@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from starlette.responses import PlainTextResponse, Response
 
 # Logging setup
+# Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.DEBUG)
 logging.getLogger("httpcore").setLevel(logging.DEBUG)
@@ -37,6 +38,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # In-memory state
 USER_STATES: Dict[int, Dict[str, Any]] = {}
 INTERESTS = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining", "Discounts only", "Giveaways only"]
+CATEGORIES = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining"]
 STARTER_POINTS = 100
 STATE_TTL_SECONDS = 30 * 60  # 30 minutes
 EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
@@ -225,6 +227,12 @@ def create_main_menu_keyboard():
         ]
     }
 
+def create_categories_keyboard():
+    buttons = []
+    for cat in CATEGORIES:
+        buttons.append([{"text": cat, "callback_data": f"discount_category:{cat}"}])
+    return {"inline_keyboard": buttons}
+
 def create_phone_keyboard():
     return {
         "keyboard": [[{"text": "Share phone", "request_contact": True}]],
@@ -304,6 +312,20 @@ async def supabase_find_business(business_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"supabase_find_business failed for business_id {business_id}: {str(e)}", exc_info=True)
         return None
 
+async def supabase_find_discount(discount_id: str) -> Optional[Dict[str, Any]]:
+    def _q():
+        return supabase.table("discounts").select("*").eq("id", discount_id).limit(1).execute()
+    try:
+        resp = await asyncio.to_thread(_q)
+        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        if not data:
+            logger.info(f"No discount found for discount_id {discount_id}")
+            return None
+        return data[0]
+    except Exception as e:
+        logger.error(f"supabase_find_discount failed for discount_id {discount_id}: {str(e)}", exc_info=True)
+        return None
+
 async def supabase_find_giveaway(giveaway_id: str) -> Optional[Dict[str, Any]]:
     def _q():
         return supabase.table("giveaways").select("*").eq("id", giveaway_id).limit(1).execute()
@@ -318,37 +340,70 @@ async def supabase_find_giveaway(giveaway_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"supabase_find_giveaway failed for giveaway_id {giveaway_id}: {str(e)}", exc_info=True)
         return None
 
-async def generate_promo_code(chat_id: int, business_id: str, discount_id: str, discount_type: str = "standard") -> tuple[str, str]:
+async def generate_discount_code(chat_id: int, business_id: str, discount_id: str) -> tuple[str, str]:
     if not business_id or not discount_id:
         logger.error(f"Invalid business_id: {business_id} or discount_id: {discount_id} for chat_id {chat_id}")
         raise ValueError("Business ID or discount ID is missing or invalid")
-    def _check_existing():
-        return supabase.table("user_giveaways").select("promo_code").eq("promo_code", code).eq("business_id", business_id).execute()
+    def _check_existing_code():
+        return supabase.table("user_discounts").select("promo_code").eq("promo_code", code).eq("business_id", business_id).execute()
+    def _check_claimed():
+        return supabase.table("user_discounts").select("id").eq("telegram_id", chat_id).eq("discount_id", discount_id).execute()
+    claimed = await asyncio.to_thread(_check_claimed)
+    if claimed.data:
+        raise ValueError("Already claimed this discount")
     while True:
         code = f"{random.randint(0, 9999):04d}"
-        existing = await asyncio.to_thread(_check_existing)
+        existing = await asyncio.to_thread(_check_existing_code)
         if not existing.data:
             break
     expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
     payload = {
         "telegram_id": chat_id,
         "business_id": business_id,
-        "giveaway_id": discount_id,
+        "discount_id": discount_id,
+        "promo_code": code,
+        "promo_expiry": expiry,
+        "entry_status": "standard",
+        "joined_at": now_iso()
+    }
+    inserted = await supabase_insert_return("user_discounts", payload)
+    if not inserted:
+        logger.error(f"Failed to insert discount promo code for chat_id: {chat_id}, discount_id: {discount_id}")
+        raise RuntimeError("Failed to save promo code")
+    logger.info(f"Generated discount promo code {code} for chat_id {chat_id}, discount_id {discount_id}")
+    return code, expiry
+
+async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, discount_type: str = "standard") -> tuple[str, str]:
+    if not business_id or not giveaway_id:
+        logger.error(f"Invalid business_id: {business_id} or giveaway_id: {giveaway_id} for chat_id {chat_id}")
+        raise ValueError("Business ID or giveaway ID is missing or invalid")
+    def _check_existing_code():
+        return supabase.table("user_giveaways").select("promo_code").eq("promo_code", code).eq("business_id", business_id).execute()
+    while True:
+        code = f"{random.randint(0, 9999):04d}"
+        existing = await asyncio.to_thread(_check_existing_code)
+        if not existing.data:
+            break
+    expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    payload = {
+        "telegram_id": chat_id,
+        "business_id": business_id,
+        "giveaway_id": giveaway_id,
         "promo_code": code,
         "promo_expiry": expiry,
         "entry_status": discount_type
     }
     inserted = await supabase_insert_return("user_giveaways", payload)
     if not inserted:
-        logger.error(f"Failed to insert promo code for chat_id: {chat_id}, discount_id: {discount_id}")
+        logger.error(f"Failed to insert giveaway promo code for chat_id: {chat_id}, giveaway_id: {giveaway_id}")
         raise RuntimeError("Failed to save promo code")
-    logger.info(f"Generated promo code {code} for chat_id {chat_id}, discount_id {discount_id}")
+    logger.info(f"Generated giveaway promo code {code} for chat_id {chat_id}, giveaway_id: {giveaway_id}")
     return code, expiry
 
 async def has_redeemed_discount(chat_id: int) -> bool:
     def _q():
         current_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        return supabase.table("user_giveaways").select("id").eq("telegram_id", chat_id).eq("entry_status", "redeemed").gte("redeemed_at", current_month.isoformat()).execute()
+        return supabase.table("user_discounts").select("id").eq("telegram_id", chat_id).eq("entry_status", "standard").gte("joined_at", current_month.isoformat()).execute()
     try:
         resp = await asyncio.to_thread(_q)
         data = resp.data if hasattr(resp, "data") else resp.get("data")
@@ -818,27 +873,12 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             if not interests:
                 await send_message(chat_id, "No interests set. Please update your profile.")
                 return {"ok": True}
-            def _query_discounts():
-                return supabase.table("giveaways").select("*").in_("category", interests).eq("active", True).eq("business_type", "discount").execute()
-            try:
-                resp = await asyncio.to_thread(_query_discounts)
-                discounts = resp.data if hasattr(resp, "data") else resp.get("data", [])
-                if not discounts:
-                    await send_message(chat_id, "No discounts available for your interests. Check Discover Offers:", reply_markup=create_main_menu_keyboard())
-                    return {"ok": True}
-                for d in discounts:
-                    business_type = d.get("business_type", "salon").capitalize()
-                    message = f"{business_type}: *{d['name']}* at {d.get('salon_name')} ({d.get('category')})"
-                    keyboard = {"inline_keyboard": [[{"text": "Get Code", "callback_data": f"discount:{d['id']}"}]]}
-                    await send_message(chat_id, message, keyboard)
-            except Exception as e:
-                logger.error(f"Failed to fetch discounts for chat_id {chat_id}: {str(e)}", exc_info=True)
-                await send_message(chat_id, "Failed to load discounts. Please try again later.")
+            await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard())
             return {"ok": True}
         elif callback_data == "menu:giveaways":
             try:
                 if not await has_redeemed_discount(chat_id):
-                    await send_message(chat_id, "Redeem a discount first to unlock giveaways. Check Discounts:", reply_markup=create_main_menu_keyboard())
+                    await send_message(chat_id, "Claim a discount first to unlock giveaways. Check Discounts:", reply_markup=create_main_menu_keyboard())
                     return {"ok": True}
                 interests = registered.get("interests", []) or []
                 if not interests:
@@ -864,29 +904,96 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 logger.error(f"Failed to fetch giveaways for chat_id {chat_id}: {str(e)}", exc_info=True)
                 await send_message(chat_id, "Failed to load giveaways. Please try again later.")
             return {"ok": True}
-        elif callback_data.startswith("discount:"):
-            discount_id = callback_data[len("discount:"):]
+        elif callback_data.startswith("discount_category:"):
+            category = callback_data[len("discount_category:"):]
+            if category not in CATEGORIES:
+                await send_message(chat_id, "Invalid category.")
+                return {"ok": True}
+            try:
+                def _query_discounts():
+                    return supabase.table("discounts").select("*").eq("category", category).eq("active", True).execute()
+                resp = await asyncio.to_thread(_query_discounts)
+                discounts = resp.data if hasattr(resp, "data") else resp.get("data", [])
+                if not discounts:
+                    await send_message(chat_id, f"No discounts available in {category}.")
+                    return {"ok": True}
+                for d in discounts:
+                    business = await supabase_find_business(d["business_id"])
+                    location = business["location"] if business else "Unknown"
+                    message = f"*{d['name']}*\n{d['discount_percentage']}% off on {d['category']}\nAt {business['name'] if business else 'Unknown'}, {location}"
+                    keyboard = {"inline_keyboard": [
+                        [
+                            {"text": "View Profile", "callback_data": f"profile:{d['business_id']}"},
+                            {"text": "View Services", "callback_data": f"services:{d['business_id']}"}
+                        ],
+                        [
+                            {"text": "Book", "callback_data": f"book:{d['business_id']}"},
+                            {"text": "Get Discount", "callback_data": f"get_discount:{d['id']}"}
+                        ]
+                    ]}
+                    await send_message(chat_id, message, keyboard)
+            except Exception as e:
+                logger.error(f"Failed to fetch discounts for category {category}, chat_id {chat_id}: {str(e)}", exc_info=True)
+                await send_message(chat_id, "Failed to load discounts. Please try again later.")
+            return {"ok": True}
+        elif callback_data.startswith("profile:"):
+            business_id = callback_data[len("profile:"):]
+            try:
+                business = await supabase_find_business(business_id)
+                if not business:
+                    await send_message(chat_id, "Business not found.")
+                    return {"ok": True}
+                msg = f"Business Profile:\nName: {business['name']}\nCategory: {business['category']}\nLocation: {business['location']}\nPhone: {business['phone_number']}\nWork Days: {', '.join(business['work_days'])}"
+                await send_message(chat_id, msg)
+            except Exception as e:
+                logger.error(f"Failed to fetch business profile {business_id}: {str(e)}")
+                await send_message(chat_id, "Failed to load profile.")
+            return {"ok": True}
+        elif callback_data.startswith("services:"):
+            business_id = callback_data[len("services:"):]
+            try:
+                business = await supabase_find_business(business_id)
+                if not business:
+                    await send_message(chat_id, "Business not found.")
+                    return {"ok": True}
+                prices = business.get("prices", {})
+                msg = "Services:\n" + "\n".join(f"{k}: {v}" for k, v in prices.items()) if prices else "No services listed."
+                await send_message(chat_id, msg)
+            except Exception as e:
+                logger.error(f"Failed to fetch business services {business_id}: {str(e)}")
+                await send_message(chat_id, "Failed to load services.")
+            return {"ok": True}
+        elif callback_data.startswith("book:"):
+            business_id = callback_data[len("book:"):]
+            try:
+                business = await supabase_find_business(business_id)
+                if not business:
+                    await send_message(chat_id, "Business not found.")
+                    return {"ok": True}
+                msg = f"To book, please contact {business['name']} at {business['phone_number']}."
+                await send_message(chat_id, msg)
+            except Exception as e:
+                logger.error(f"Failed to fetch book info {business_id}: {str(e)}")
+                await send_message(chat_id, "Failed to load booking info.")
+            return {"ok": True}
+        elif callback_data.startswith("get_discount:"):
+            discount_id = callback_data[len("get_discount:"):]
             try:
                 uuid.UUID(discount_id)
-                def _query_discount():
-                    return supabase.table("giveaways").select("*").eq("id", discount_id).eq("active", True).limit(1).execute()
-                resp = await asyncio.to_thread(_query_discount)
-                discount = resp.data[0] if resp.data else None
-                if not discount:
+                discount = await supabase_find_discount(discount_id)
+                if not discount or not discount["active"]:
                     await send_message(chat_id, "Discount not found or inactive.")
                     return {"ok": True}
                 if not discount.get("business_id"):
                     logger.error(f"Missing business_id for discount_id: {discount_id}")
                     await send_message(chat_id, "Sorry, this discount is unavailable due to a configuration issue. Please try another.")
                     return {"ok": True}
-                code, expiry = await generate_promo_code(chat_id, discount["business_id"], discount_id)
-                business_type = discount.get("business_type", "salon").capitalize()
-                await send_message(chat_id, f"Your promo code: *{code}* for {discount['name']} at {business_type} {discount.get('salon_name')}. Valid until {expiry.split('T')[0]}.")
-            except ValueError:
-                logger.error(f"Invalid discount_id format: {discount_id}")
-                await send_message(chat_id, "Invalid discount ID.")
+                code, expiry = await generate_discount_code(chat_id, discount["business_id"], discount_id)
+                await send_message(chat_id, f"Your promo code: *{code}* for {discount['name']}. Valid until {expiry.split('T')[0]}.")
+            except ValueError as ve:
+                await send_message(chat_id, str(ve))
             except Exception as e:
-                logger.error(f"Failed to generate promo code for discount_id: {discount_id}, chat_id: {chat_id}: {str(e)}", exc_info=True)
+                logger.error(f"Failed to generate discount code for discount_id: {discount_id}, chat_id: {chat_id}: {str(e)}", exc_info=True)
                 await send_message(chat_id, "Failed to generate promo code. Please try again later.")
             return {"ok": True}
         elif callback_data.startswith("giveaway_points:"):
