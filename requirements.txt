@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+requests
+python-dotenv
+supabase
+httpx>=0.23.0
