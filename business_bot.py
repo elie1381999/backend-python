@@ -12,7 +12,10 @@ from fastapi import Request, FastAPI
 from starlette.responses import Response, PlainTextResponse
 
 # Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logging.getLogger("httpx").setLevel(logging.DEBUG)
 logging.getLogger("httpcore").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -29,8 +32,9 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 CENTRAL_BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, CENTRAL_BOT_TOKEN]):
-    raise RuntimeError("BUSINESS_BOT_TOKEN / SUPABASE_URL / SUPABASE_KEY / ADMIN_CHAT_ID / CENTRAL_BOT_TOKEN must be set in .env")
+    raise RuntimeError("Required environment variables missing: BUSINESS_BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, CENTRAL_BOT_TOKEN")
 
+# Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # In-memory state
@@ -40,30 +44,48 @@ CATEGORIES = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casua
 WEEK_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 def now_iso():
+    """Return current UTC time in ISO format."""
     return datetime.now(timezone.utc).isoformat()
 
 def set_state(chat_id: int, state: Dict[str, Any]):
+    """Set user state with timestamp."""
     state["updated_at"] = now_iso()
     USER_STATES[chat_id] = state
+    logger.debug(f"Set state for chat_id {chat_id}: {state}")
 
 def get_state(chat_id: int) -> Optional[Dict[str, Any]]:
-    st = USER_STATES.get(chat_id)
-    if not st:
+    """Get user state, expire if too old."""
+    state = USER_STATES.get(chat_id)
+    if not state:
+        logger.debug(f"No state found for chat_id {chat_id}")
         return None
     try:
-        updated = datetime.fromisoformat(st.get("updated_at"))
+        updated = datetime.fromisoformat(state.get("updated_at"))
         if (datetime.now(timezone.utc) - updated).total_seconds() > STATE_TTL_SECONDS:
             USER_STATES.pop(chat_id, None)
+            logger.info(f"Expired state for chat_id {chat_id}")
             return None
-    except Exception:
+    except Exception as e:
+        logger.error(f"Invalid state timestamp for chat_id {chat_id}: {str(e)}")
         USER_STATES.pop(chat_id, None)
         return None
-    return st
+    return state
+
+async def create_category_keyboard() -> dict:
+    """Create inline keyboard for category selection."""
+    buttons = [
+        [{"text": category, "callback_data": f"category_{category}"}]
+        for category in CATEGORIES
+    ]
+    return {"inline_keyboard": buttons}
 
 async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, retries: int = 3):
-    if not chat_id:
-        logger.error("Invalid chat_id for send_message")
+    """Send a message to a Telegram chat."""
+    if not isinstance(chat_id, int) or chat_id == 0:
+        logger.error(f"Invalid chat_id: {chat_id}")
+        await log_error_to_supabase(f"Invalid chat_id: {chat_id}")
         return {"ok": False, "error": "Invalid chat_id"}
+    
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
         if reply_markup:
@@ -81,6 +103,7 @@ async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = N
             except httpx.HTTPStatusError as e:
                 logger.error(f"Failed to send message: HTTP {e.response.status_code} - {e.response.text}")
                 if e.response.status_code == 400 and "chat not found" in e.response.text.lower():
+                    await log_error_to_supabase(f"Chat not found for chat_id {chat_id}")
                     return {"ok": False, "error": "Chat not found"}
                 if e.response.status_code == 429:
                     retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
@@ -93,9 +116,16 @@ async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = N
                     await asyncio.sleep(1.0 * (2 ** attempt))
                 continue
         logger.error(f"Failed to send message to chat_id {chat_id} after {retries} attempts")
+        await log_error_to_supabase(f"Failed to send message to chat_id {chat_id} after {retries} attempts")
         return {"ok": False, "error": "Max retries reached"}
 
 async def edit_message(chat_id: int, message_id: int, text: str, reply_markup: Optional[dict] = None, retries: int = 3):
+    """Edit an existing message in a Telegram chat."""
+    if not isinstance(chat_id, int) or chat_id == 0 or not isinstance(message_id, int):
+        logger.error(f"Invalid parameters: chat_id={chat_id}, message_id={message_id}")
+        await log_error_to_supabase(f"Invalid parameters: chat_id={chat_id}, message_id={message_id}")
+        return {"ok": False, "error": "Invalid parameters"}
+    
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
         if reply_markup:
@@ -112,6 +142,9 @@ async def edit_message(chat_id: int, message_id: int, text: str, reply_markup: O
                 return response.json()
             except httpx.HTTPStatusError as e:
                 logger.error(f"Failed to edit message: HTTP {e.response.status_code} - {e.response.text}")
+                if e.response.status_code == 400 and "chat not found" in e.response.text.lower():
+                    await log_error_to_supabase(f"Chat not found for chat_id {chat_id}")
+                    return {"ok": False, "error": "Chat not found"}
                 if e.response.status_code == 429:
                     retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
                     await asyncio.sleep(retry_after)
@@ -123,40 +156,74 @@ async def edit_message(chat_id: int, message_id: int, text: str, reply_markup: O
                     await asyncio.sleep(1.0 * (2 ** attempt))
                 continue
         logger.error(f"Failed to edit message {message_id} in chat_id {chat_id} after {retries} attempts")
+        await log_error_to_supabase(f"Failed to edit message {message_id} in chat_id {chat_id} after {retries} attempts")
         return {"ok": False, "error": "Max retries reached"}
 
 async def send_admin_message(text: str, reply_markup: Optional[dict] = None, retries: int = 3):
+    """Send a message to the admin chat."""
+    try:
+        admin_chat_id = int(ADMIN_CHAT_ID)
+    except ValueError:
+        logger.error(f"Invalid ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
+        await log_error_to_supabase(f"Invalid ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
+        return {"ok": False, "error": "Invalid ADMIN_CHAT_ID"}
+    
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        payload = {"chat_id": int(ADMIN_CHAT_ID), "text": text, "parse_mode": "Markdown"}
+        payload = {"chat_id": admin_chat_id, "text": text, "parse_mode": "Markdown"}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         for attempt in range(retries):
             try:
+                logger.debug(f"Sending admin message to {admin_chat_id} (attempt {attempt + 1}): {text}")
                 response = await client.post(
                     f"https://api.telegram.org/bot{CENTRAL_BOT_TOKEN}/sendMessage",
                     json=payload
                 )
                 response.raise_for_status()
-                logger.info(f"Sent admin message to {ADMIN_CHAT_ID}: {text}")
+                logger.info(f"Sent admin message to {admin_chat_id}: {text}")
                 return response.json()
             except httpx.HTTPStatusError as e:
-                logger.error(f"Failed to send admin message: HTTP {e.response.status_code}")
+                logger.error(f"Failed to send admin message: HTTP {e.response.status_code} - {e.response.text}")
+                if e.response.status_code == 400 and "chat not found" in e.response.text.lower():
+                    await log_error_to_supabase(f"Admin chat_id {admin_chat_id} not found")
+                    return {"ok": False, "error": "Admin chat not found"}
                 if e.response.status_code == 429:
                     retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
                     await asyncio.sleep(retry_after)
                     continue
-                return {"ok": False}
+                return {"ok": False, "error": f"HTTP {e.response.status_code}"}
             except Exception as e:
-                logger.error(f"Failed to send admin message: {str(e)}")
+                logger.error(f"Failed to send admin message: {str(e)}", exc_info=True)
                 if attempt < retries - 1:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                 continue
-        logger.error(f"Failed to send admin message after {retries} attempts")
-        return {"ok": False}
+        logger.error(f"Failed to send admin message to {admin_chat_id} after {retries} attempts")
+        await log_error_to_supabase(f"Failed to send admin message to {admin_chat_id} after {retries} attempts")
+        return {"ok": False, "error": "Max retries reached"}
+
+async def log_error_to_supabase(error_message: str):
+    """Log errors to Supabase table."""
+    payload = {
+        "error": error_message,
+        "created_at": now_iso(),
+        "bot": "business_bot"
+    }
+    try:
+        def _ins():
+            return supabase.table("bot_errors").insert(payload).execute()
+        resp = await asyncio.to_thread(_ins)
+        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        if data:
+            logger.info(f"Logged error to Supabase: {error_message}")
+        else:
+            logger.error(f"Failed to log error to Supabase: {error_message}")
+    except Exception as e:
+        logger.error(f"Failed to log error to Supabase: {str(e)}", exc_info=True)
 
 async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str, Any]]:
-    payload['created_at'] = now_iso()  # Explicitly add created_at to payload
-    payload['updated_at'] = now_iso()  # Explicitly add updated_at to payload
+    """Insert data into Supabase and return the inserted record."""
+    payload['created_at'] = now_iso()
+    payload['updated_at'] = now_iso()
     try:
         def _ins():
             return supabase.table(table).insert(payload).execute()
@@ -164,14 +231,17 @@ async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str
         data = resp.data if hasattr(resp, "data") else resp.get("data")
         if not data:
             logger.error(f"Failed to insert into {table}: no data returned")
+            await log_error_to_supabase(f"Failed to insert into {table}: no data returned")
             return None
         logger.info(f"Inserted into {table}: {data[0]}")
         return data[0]
     except Exception as e:
         logger.error(f"supabase_insert_return failed for table {table}: {str(e)}", exc_info=True)
+        await log_error_to_supabase(f"supabase_insert_return failed for table {table}: {str(e)}")
         return None
 
 async def supabase_find_business(chat_id: int) -> Optional[Dict[str, Any]]:
+    """Find a business by chat_id in Supabase."""
     try:
         def _q():
             return supabase.table("businesses").select("*").eq("telegram_id", chat_id).limit(1).execute()
@@ -183,15 +253,78 @@ async def supabase_find_business(chat_id: int) -> Optional[Dict[str, Any]]:
         return data[0]
     except Exception as e:
         logger.error(f"supabase_find_business failed for chat_id {chat_id}: {str(e)}", exc_info=True)
+        await log_error_to_supabase(f"supabase_find_business failed for chat_id {chat_id}: {str(e)}")
         return None
 
+async def initialize_bot():
+    """Initialize bot by setting webhook and commands."""
+    webhook_url = "https://backend-python-6q8a.onrender.com/hook/business_bot"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        try:
+            # Set webhook
+            response = await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                json={"url": webhook_url}
+            )
+            response.raise_for_status()
+            logger.info(f"Webhook set to {webhook_url}")
+            
+            # Set menu button
+            await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setChatMenuButton",
+                json={"menu_button": {"type": "commands"}}
+            )
+            logger.info("Set menu button")
+            
+            # Set bot commands
+            commands = [
+                {"command": "start", "description": "Start the bot"},
+                {"command": "register", "description": "Register your business"}
+            ]
+            await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands",
+                json={"commands": commands}
+            )
+            logger.info("Set bot commands")
+        except Exception as e:
+            logger.error(f"Failed to initialize bot: {str(e)}", exc_info=True)
+            await log_error_to_supabase(f"Failed to initialize bot: {str(e)}")
+
+async def handle_callback_query(callback_query: Dict[str, Any]):
+    """Handle callback queries from inline keyboards."""
+    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+    message_id = callback_query.get("message", {}).get("message_id")
+    data = callback_query.get("data")
+    if not chat_id or not message_id or not data:
+        logger.error(f"Invalid callback query: {callback_query}")
+        await log_error_to_supabase(f"Invalid callback query: {callback_query}")
+        return
+
+    state = get_state(chat_id) or {}
+    if data.startswith("category_"):
+        category = data.replace("category_", "")
+        if category not in CATEGORIES:
+            await send_message(chat_id, "Invalid category selected.")
+            return
+        state["data"]["category"] = category
+        state["stage"] = "awaiting_address"
+        await edit_message(
+            chat_id,
+            message_id,
+            f"Selected category: {category}\nPlease enter your business address:"
+        )
+        set_state(chat_id, state)
+
+@app.post("/hook/business_bot")
 async def webhook_handler(request: Request):
+    """Handle incoming Telegram updates."""
     try:
         update = await request.json()
         if not update:
             logger.error("Received empty update from Telegram")
             return Response(status_code=200)
-        await initialize_bot()
+        
+        logger.info(f"Received update: {json.dumps(update, indent=2)}")
         message = update.get("message")
         if message:
             await handle_message_update(message)
@@ -201,21 +334,24 @@ async def webhook_handler(request: Request):
         return Response(status_code=200)
     except json.JSONDecodeError:
         logger.error("Invalid JSON in webhook", exc_info=True)
+        await log_error_to_supabase("Invalid JSON in webhook")
         return Response(status_code=200)
     except Exception as e:
         logger.error(f"Error processing webhook update: {str(e)}", exc_info=True)
+        await log_error_to_supabase(f"Error processing webhook update: {str(e)}")
         return Response(status_code=200)
 
-@app.get("/health")
-async def health() -> PlainTextResponse:
-    return PlainTextResponse("OK", status_code=200)
-
 async def handle_message_update(message: Dict[str, Any]):
+    """Handle incoming messages."""
     chat_id = message.get("chat", {}).get("id")
+    text = (message.get("text") or "").strip()
+    logger.info(f"Handling message from chat_id {chat_id}: {text}")
+    
     if not chat_id:
         logger.error("No chat_id in message")
+        await log_error_to_supabase("No chat_id in message")
         return {"ok": True}
-    text = (message.get("text") or "").strip()
+    
     state = get_state(chat_id) or {}
 
     # Handle /start
@@ -236,30 +372,70 @@ async def handle_message_update(message: Dict[str, Any]):
         if business:
             await send_message(chat_id, "You’ve already registered!")
             return {"ok": True}
-        state = {"stage": "awaiting_name", "data": {"telegram_id": chat_id, "prices": {}, "work_days": []}, "entry_id": None}
+        state = {
+            "stage": "awaiting_name",
+            "data": {"telegram_id": chat_id, "prices": {}, "work_days": []},
+            "entry_id": None
+        }
         await send_message(chat_id, "Enter your business name:")
         set_state(chat_id, state)
         return {"ok": True}
 
-    # Handle registration steps (as in your code)
+    # Handle registration steps
     if state.get("stage") == "awaiting_name":
         state["data"]["name"] = text
         await send_message(chat_id, "Choose your business category:", reply_markup=await create_category_keyboard())
         state["stage"] = "awaiting_category"
         set_state(chat_id, state)
         return {"ok": True}
+    
+    if state.get("stage") == "awaiting_address":
+        state["data"]["address"] = text
+        await send_message(chat_id, "Enter your business phone number:")
+        state["stage"] = "awaiting_phone"
+        set_state(chat_id, state)
+        return {"ok": True}
+    
+    if state.get("stage") == "awaiting_phone":
+        state["data"]["phone"] = text
+        await send_message(chat_id, "Enter your business website (or type 'none' if you don’t have one):")
+        state["stage"] = "awaiting_website"
+        set_state(chat_id, state)
+        return {"ok": True}
+    
+    if state.get("stage") == "awaiting_website":
+        state["data"]["website"] = text if text.lower() != "none" else None
+        await send_message(chat_id, "Enter your business description:")
+        state["stage"] = "awaiting_description"
+        set_state(chat_id, state)
+        return {"ok": True}
+    
+    if state.get("stage") == "awaiting_description":
+        state["data"]["description"] = text
+        state["data"]["status"] = "pending"
+        business = await supabase_insert_return("businesses", state["data"])
+        if business:
+            await send_message(chat_id, "Registration complete! Your business is pending approval.")
+            await send_admin_message(
+                f"New business registration:\nName: {state['data']['name']}\nCategory: {state['data']['category']}\nAddress: {state['data']['address']}"
+            )
+            USER_STATES.pop(chat_id, None)
+        else:
+            await send_message(chat_id, "Failed to register business. Please try again.")
+        return {"ok": True}
 
-    # (Other registration steps remain the same)
-
+    await send_message(chat_id, "Unknown command or state. Use /start or /register.")
     return {"ok": True}
 
-# (Rest of the code remains the same as your provided version, with the fixes applied to supabase_insert_return and send_message)
+@app.get("/health")
+async def health() -> PlainTextResponse:
+    """Health check endpoint."""
+    return PlainTextResponse("OK", status_code=200)
 
 if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
 
 
 
