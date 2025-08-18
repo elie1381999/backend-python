@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.DEBUG)
 logging.getLogger("httpcore").setLevel(logging.DEBUG)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("business_bot")
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -297,18 +297,22 @@ async def initialize_bot():
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to verify ADMIN_CHAT_ID {ADMIN_CHAT_ID}: HTTP {e.response.status_code} - {e.response.text}")
             await log_error_to_supabase(f"Failed to verify ADMIN_CHAT_ID {ADMIN_CHAT_ID}: {e.response.text}")
+            if "chat not found" in e.response.text.lower():
+                raise RuntimeError(f"ADMIN_CHAT_ID {ADMIN_CHAT_ID} is invalid. Please verify using /getUpdates.")
         except Exception as e:
             logger.error(f"Failed to verify ADMIN_CHAT_ID {ADMIN_CHAT_ID}: {str(e)}")
             await log_error_to_supabase(f"Failed to verify ADMIN_CHAT_ID {ADMIN_CHAT_ID}: {str(e)}")
+            raise
 
         try:
             # Set webhook
+            webhook_url = f"{WEBHOOK_URL}/business_bot"
             response = await client.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                json={"url": f"{WEBHOOK_URL}/business_bot"}
+                json={"url": webhook_url}
             )
             response.raise_for_status()
-            logger.info(f"Webhook set to {WEBHOOK_URL}/business_bot")
+            logger.info(f"Webhook set to {webhook_url}")
             
             # Set menu button
             await client.post(
@@ -335,6 +339,7 @@ async def initialize_bot():
         except Exception as e:
             logger.error(f"Failed to initialize bot: {str(e)}", exc_info=True)
             await log_error_to_supabase(f"Failed to initialize bot: {str(e)}")
+            raise
 
 async def webhook_handler(request: Request):
     """Handle incoming Telegram updates."""
@@ -943,11 +948,15 @@ async def health() -> PlainTextResponse:
     """Health check endpoint."""
     return PlainTextResponse("OK", status_code=200)
 
+@app.post("/hook/business_bot")
+async def webhook(request: Request):
+    """Webhook endpoint for Business Bot."""
+    return await webhook_handler(request)
+
 if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
 
 
 
