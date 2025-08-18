@@ -433,7 +433,8 @@ if __name__ == "__main__":
 
 
 
-'''import os
+'''
+import os
 import logging
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -652,7 +653,8 @@ def health_check():
 
 
 
-'''import os
+'''
+import os
 import logging
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
@@ -711,4 +713,5 @@ async def telegram_by_webhook_id(webhook_id: str, request: Request):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}'''
+    return {"status": "ok"}
+    '''
