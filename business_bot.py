@@ -31,8 +31,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, WEBHOOK_URL]):
-    raise RuntimeError("Missing required environment variables: BUSINESS_BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, WEBHOOK_URL")
+if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID]):
+    raise RuntimeError("Missing required environment variables: BUSINESS_BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID")
 
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -44,8 +44,8 @@ CATEGORIES = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casua
 WEEK_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MAX_DISCOUNT_PERCENTAGE = 100
 MIN_DISCOUNT_PERCENTAGE = 1
-MAX_DESCRIPTION_LENGTH = 500
 MAX_NAME_LENGTH = 100
+MAX_DESCRIPTION_LENGTH = 500
 
 def now_iso():
     """Return current UTC time in ISO format."""
@@ -102,7 +102,7 @@ async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = N
         return {"ok": False, "error": "Invalid chat_id"}
     
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        payload = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "Markdown"}  # Telegram message limit
+        payload = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "Markdown"}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         for attempt in range(retries):
@@ -306,10 +306,10 @@ async def initialize_bot():
 
         try:
             # Set webhook
-            webhook_url = f"{WEBHOOK_URL}/business_bot"
+            webhook_url = f"https://backend-python-6q8a.onrender.com/hook/business_bot"
             response = await client.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                json={"url": webhook_url}
+                json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]}
             )
             response.raise_for_status()
             logger.info(f"Webhook set to {webhook_url}")
@@ -422,11 +422,11 @@ async def handle_message_update(message: Dict[str, Any]):
             await send_message(chat_id, "Your business is not yet approved.")
             return {"ok": True}
         state = {
-            "stage": "awaiting_discount_name",
-            "data": {"business_id": business["id"], "percentage": None, "valid_until": None},
+            "stage": "awaiting_discount_type",
+            "data": {"business_id": business["id"], "salon_name": business["name"]},
             "entry_id": None
         }
-        await send_message(chat_id, "Enter the discount/giveaway name (e.g., '20% Off Nail Art'):")
+        await send_message(chat_id, "Is this a discount or giveaway?", reply_markup=await create_discount_type_keyboard())
         set_state(chat_id, state)
         return {"ok": True}
 
@@ -481,18 +481,23 @@ async def handle_message_update(message: Dict[str, Any]):
             await send_message(chat_id, "Please register your business first with /register.")
             return {"ok": True}
         try:
-            def _q():
+            def _q_discounts():
+                return supabase.table("discounts").select("*").eq("business_id", business["id"]).execute()
+            def _q_giveaways():
                 return supabase.table("giveaways").select("*").eq("business_id", business["id"]).execute()
-            resp = await asyncio.to_thread(_q)
-            data = resp.data if hasattr(resp, "data") else resp.get("data")
-            if not data:
+            resp_discounts = await asyncio.to_thread(_q_discounts)
+            resp_giveaways = await asyncio.to_thread(_q_giveaways)
+            discounts = resp_discounts.data if hasattr(resp_discounts, "data") else resp_discounts.get("data", [])
+            giveaways = resp_giveaways.data if hasattr(resp_giveaways, "data") else resp_giveaways.get("data", [])
+            if not (discounts or giveaways):
                 await send_message(chat_id, "No discounts or giveaways registered.")
                 return {"ok": True}
-            discounts_text = "\n".join([
-                f"- {d['name']} ({d['business_type']}): {'Active' if d['active'] else 'Pending/Inactive'}"
-                for d in data
-            ])
-            await send_message(chat_id, f"Your discounts/giveaways:\n{discounts_text}")
+            offers_text = []
+            for d in discounts:
+                offers_text.append(f"- {d['name']} (Discount, {d['discount_percentage']}%): {'Active' if d['active'] else 'Pending/Inactive'}")
+            for g in giveaways:
+                offers_text.append(f"- {g['name']} (Giveaway): {'Active' if g['active'] else 'Pending/Inactive'}")
+            await send_message(chat_id, f"Your discounts/giveaways:\n{'\n'.join(offers_text)}")
         except Exception as e:
             logger.error(f"Failed to list discounts for chat_id {chat_id}: {str(e)}")
             await send_message(chat_id, "Failed to retrieve discounts. Please try again.")
@@ -541,7 +546,7 @@ async def handle_message_update(message: Dict[str, Any]):
                 await send_message(chat_id, "Please enter a valid URL (e.g., https://example.com) or 'none':")
                 return {"ok": True}
             state["data"]["website"] = text
-        await send_message(chat_id, f"Enter a brief business description (max {MAX_DESCRIPTION_LENGTH} characters):")
+        await send_message(chat_id, f"Enter a brief business description (max {MAX_DESCRIPTION_LENGTH} characters, or 'none'):")
         state["stage"] = "awaiting_description"
         set_state(chat_id, state)
         return {"ok": True}
@@ -550,7 +555,7 @@ async def handle_message_update(message: Dict[str, Any]):
         if len(text) > MAX_DESCRIPTION_LENGTH:
             await send_message(chat_id, f"Description too long. Please use {MAX_DESCRIPTION_LENGTH} characters or fewer:")
             return {"ok": True}
-        state["data"]["description"] = text
+        state["data"]["description"] = text if text.lower() != "none" else None
         await send_message(chat_id, "Enter the name of your first service (or /skip if none):")
         state["stage"] = "awaiting_service_name"
         set_state(chat_id, state)
@@ -592,46 +597,41 @@ async def handle_message_update(message: Dict[str, Any]):
             await send_message(chat_id, "Please enter a valid number for price (e.g., 50.00).")
         return {"ok": True}
 
+    # Discount/Giveaway steps
     if state.get("stage") == "awaiting_discount_name":
         if len(text) > MAX_NAME_LENGTH:
-            await send_message(chat_id, f"Discount name too long. Please use {MAX_NAME_LENGTH} characters or fewer:")
+            await send_message(chat_id, f"Name too long. Please use {MAX_NAME_LENGTH} characters or fewer:")
             return {"ok": True}
         state["data"]["name"] = text
-        await send_message(chat_id, "Choose the category for this discount/giveaway:", reply_markup=await create_category_keyboard())
+        await send_message(chat_id, "Choose the category for this offer:", reply_markup=await create_category_keyboard())
         state["stage"] = "awaiting_discount_category"
         set_state(chat_id, state)
         return {"ok": True}
 
     if state.get("stage") == "awaiting_discount_percentage":
         try:
-            percentage = float(text)
+            percentage = int(text)
             if not (MIN_DISCOUNT_PERCENTAGE <= percentage <= MAX_DISCOUNT_PERCENTAGE):
                 await send_message(
                     chat_id,
                     f"Percentage must be between {MIN_DISCOUNT_PERCENTAGE}% and {MAX_DISCOUNT_PERCENTAGE}%. Please try again:"
                 )
                 return {"ok": True}
-            state["data"]["percentage"] = percentage
-            await send_message(chat_id, "Enter the expiration date for this discount (YYYY-MM-DD, or 'none' for no expiration):")
-            state["stage"] = "awaiting_discount_valid_until"
-            set_state(chat_id, state)
+            state["data"]["discount_percentage"] = percentage
+            await submit_discount(chat_id, state)
         except ValueError:
-            await send_message(chat_id, "Please enter a valid number for percentage (e.g., 20).")
+            await send_message(chat_id, "Please enter a valid integer for percentage (e.g., 20).")
         return {"ok": True}
 
-    if state.get("stage") == "awaiting_discount_valid_until":
-        if text.lower() == "none":
-            state["data"]["valid_until"] = None
-        else:
-            try:
-                datetime.strptime(text, "%Y-%m-%d")
-                state["data"]["valid_until"] = text
-            except ValueError:
-                await send_message(chat_id, "Please enter a valid date (YYYY-MM-DD) or 'none':")
-                return {"ok": True}
-        await send_message(chat_id, "Is this a discount or giveaway?", reply_markup=await create_discount_type_keyboard())
-        state["stage"] = "awaiting_discount_type"
-        set_state(chat_id, state)
+    if state.get("stage") == "awaiting_giveaway_cost":
+        try:
+            cost = int(text)
+            if cost < 0:
+                raise ValueError("Cost must be non-negative")
+            state["data"]["cost"] = cost
+            await submit_giveaway(chat_id, state)
+        except ValueError:
+            await send_message(chat_id, "Please enter a valid integer for cost (e.g., 200).")
         return {"ok": True}
 
     # Edit business steps
@@ -692,10 +692,11 @@ async def handle_message_update(message: Dict[str, Any]):
         if len(text) > MAX_DESCRIPTION_LENGTH:
             await send_message(chat_id, f"Description too long. Please use {MAX_DESCRIPTION_LENGTH} characters or fewer:")
             return {"ok": True}
-        updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"description": text})
+        description = text if text.lower() != "none" else None
+        updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"description": description})
         if updated:
             await send_message(chat_id, "Description updated successfully!")
-            await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Description: {text}")
+            await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Description: {description or 'None'}")
             USER_STATES.pop(chat_id, None)
         else:
             await send_message(chat_id, "Failed to update description. Please try again.")
@@ -771,23 +772,52 @@ async def submit_business_registration(chat_id: int, state: Dict[str, Any]):
         await log_error_to_supabase(f"Failed to register business for chat_id {chat_id}: {str(e)}")
         await send_message(chat_id, "Failed to register business. Please try again.")
 
-async def submit_discount(chat_id: int, state: Dict[str, Any], discount_type: str):
-    """Submit discount or giveaway to Supabase and notify admin."""
+async def submit_discount(chat_id: int, state: Dict[str, Any]):
+    """Submit discount to Supabase and notify admin."""
     try:
-        state["data"]["business_type"] = discount_type
+        state["data"]["active"] = False  # Pending approval
+        discount = await supabase_insert_return("discounts", state["data"])
+        if not discount:
+            await send_message(chat_id, "Failed to submit discount. Please try again.")
+            return
+        await send_message(chat_id, "Discount submitted! Awaiting admin approval.")
+        await send_admin_message(
+            f"New discount submission:\n"
+            f"Name: {discount['name']}\n"
+            f"Category: {discount['category']}\n"
+            f"Business ID: {discount['business_id']}\n"
+            f"Percentage: {discount['discount_percentage']}%",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "Approve", "callback_data": f"giveaway_approve:{discount['id']}"},
+                        {"text": "Reject", "callback_data": f"giveaway_reject:{discount['id']}"}
+                    ]
+                ]
+            }
+        )
+        USER_STATES.pop(chat_id, None)
+    except Exception as e:
+        logger.error(f"Failed to submit discount for chat_id {chat_id}: {str(e)}", exc_info=True)
+        await log_error_to_supabase(f"Failed to submit discount for chat_id {chat_id}: {str(e)}")
+        await send_message(chat_id, "Failed to submit discount. Please try again.")
+
+async def submit_giveaway(chat_id: int, state: Dict[str, Any]):
+    """Submit giveaway to Supabase and notify admin."""
+    try:
+        state["data"]["business_type"] = "salon"
         state["data"]["active"] = False  # Pending approval
         giveaway = await supabase_insert_return("giveaways", state["data"])
         if not giveaway:
-            await send_message(chat_id, "Failed to submit discount/giveaway. Please try again.")
+            await send_message(chat_id, "Failed to submit giveaway. Please try again.")
             return
-        await send_message(chat_id, "Discount/giveaway submitted! Awaiting admin approval.")
+        await send_message(chat_id, "Giveaway submitted! Awaiting admin approval.")
         await send_admin_message(
-            f"New {discount_type} submission:\n"
+            f"New giveaway submission:\n"
             f"Name: {giveaway['name']}\n"
             f"Category: {giveaway['category']}\n"
             f"Business ID: {giveaway['business_id']}\n"
-            f"Percentage: {giveaway['percentage'] or 'N/A'}%\n"
-            f"Valid Until: {giveaway['valid_until'] or 'None'}",
+            f"Cost: {giveaway['cost'] or 'N/A'} points",
             reply_markup={
                 "inline_keyboard": [
                     [
@@ -799,9 +829,9 @@ async def submit_discount(chat_id: int, state: Dict[str, Any], discount_type: st
         )
         USER_STATES.pop(chat_id, None)
     except Exception as e:
-        logger.error(f"Failed to submit discount for chat_id {chat_id}: {str(e)}", exc_info=True)
-        await log_error_to_supabase(f"Failed to submit discount for chat_id {chat_id}: {str(e)}")
-        await send_message(chat_id, "Failed to submit discount/giveaway. Please try again.")
+        logger.error(f"Failed to submit giveaway for chat_id {chat_id}: {str(e)}", exc_info=True)
+        await log_error_to_supabase(f"Failed to submit giveaway for chat_id {chat_id}: {str(e)}")
+        await send_message(chat_id, "Failed to submit giveaway. Please try again.")
 
 async def handle_callback_query(callback_query: Dict[str, Any]):
     """Handle callback queries from inline keyboards."""
@@ -888,25 +918,33 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             await submit_business_registration(chat_id, state)
         return {"ok": True}
 
-    # Discount: Category selection
+    # Discount/Giveaway: Type selection
+    if state.get("stage") == "awaiting_discount_type" and callback_data.startswith("discount_type:"):
+        discount_type = callback_data[len("discount_type:"):]
+        if discount_type == "discount":
+            await send_message(chat_id, "Enter the discount name (e.g., '20% Off Nail Art'):")
+            state["stage"] = "awaiting_discount_name"
+        else:  # giveaway
+            await send_message(chat_id, "Enter the giveaway name (e.g., 'Free Massage Session'):")
+            state["stage"] = "awaiting_discount_name"
+        state["data"]["type"] = discount_type
+        set_state(chat_id, state)
+        return {"ok": True}
+
+    # Discount/Giveaway: Category selection
     if state.get("stage") == "awaiting_discount_category" and callback_data.startswith("category:"):
         category = callback_data[len("category:"):]
         if category not in CATEGORIES:
             await send_message(chat_id, "Invalid category. Please choose again:", reply_markup=await create_category_keyboard())
             return {"ok": True}
         state["data"]["category"] = category
-        await send_message(chat_id, "Enter the discount percentage (e.g., 20 for 20%, or 'none' for giveaways):")
-        state["stage"] = "awaiting_discount_percentage"
+        if state["data"]["type"] == "discount":
+            await send_message(chat_id, "Enter the discount percentage (e.g., 20 for 20%):")
+            state["stage"] = "awaiting_discount_percentage"
+        else:  # giveaway
+            await send_message(chat_id, "Enter the point cost for this giveaway (e.g., 200, or 0 for none):")
+            state["stage"] = "awaiting_giveaway_cost"
         set_state(chat_id, state)
-        return {"ok": True}
-
-    # Discount: Type selection
-    if state.get("stage") == "awaiting_discount_type" and callback_data.startswith("discount_type:"):
-        discount_type = callback_data[len("discount_type:"):]
-        if discount_type == "giveaway":
-            state["data"]["percentage"] = None
-            state["data"]["valid_until"] = None
-        await submit_discount(chat_id, state, discount_type)
         return {"ok": True}
 
     # Edit business: Field selection
@@ -937,7 +975,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
         elif field == "website":
             await send_message(chat_id, "Enter the new website (e.g., https://example.com, or 'none'):")
         elif field == "description":
-            await send_message(chat_id, f"Enter the new description (max {MAX_DESCRIPTION_LENGTH} characters):")
+            await send_message(chat_id, f"Enter the new description (max {MAX_DESCRIPTION_LENGTH} characters, or 'none'):")
         set_state(chat_id, state)
         return {"ok": True}
 
