@@ -29,7 +29,6 @@ BOT_TOKEN = os.getenv("BUSINESS_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID]):
     raise RuntimeError("Missing required environment variables: BUSINESS_BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID")
@@ -306,7 +305,7 @@ async def initialize_bot():
 
         try:
             # Set webhook
-            webhook_url = f"https://backend-python-6q8a.onrender.com/hook/business_bot"
+            webhook_url = "https://backend-python-6q8a.onrender.com/hook/business_bot"
             response = await client.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
                 json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]}
@@ -497,7 +496,7 @@ async def handle_message_update(message: Dict[str, Any]):
                 offers_text.append(f"- {d['name']} (Discount, {d['discount_percentage']}%): {'Active' if d['active'] else 'Pending/Inactive'}")
             for g in giveaways:
                 offers_text.append(f"- {g['name']} (Giveaway): {'Active' if g['active'] else 'Pending/Inactive'}")
-            await send_message(chat_id, f"Your discounts/giveaways:\n{'\n'.join(offers_text)}")
+            await send_message(chat_id, "Your discounts/giveaways:\n" + "\n".join(offers_text))
         except Exception as e:
             logger.error(f"Failed to list discounts for chat_id {chat_id}: {str(e)}")
             await send_message(chat_id, "Failed to retrieve discounts. Please try again.")
@@ -995,7 +994,6 @@ if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
 
 
 
