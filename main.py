@@ -1,3 +1,4 @@
+'''
 import os
 import json
 import logging
@@ -417,23 +418,22 @@ if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 '''
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import os
 import logging
 from dotenv import load_dotenv
@@ -511,7 +511,6 @@ def root():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
-'''
 
 
 
