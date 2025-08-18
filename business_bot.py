@@ -843,6 +843,65 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
         return {"ok": True}
 
     state = get_state(chat_id) or {}
+    logger.info(f"Processing callback query from chat_id {chat_id}: {callback_data}")
+
+    # Admin Approval/Rejection
+    if callback_data.startswith("approve:") or callback_data.startswith("reject:"):
+        action, business_id = callback_data.split(":", 1)
+        status = "approved" if action == "approve" else "rejected"
+        
+        # Verify admin privileges
+        if str(chat_id) != str(ADMIN_CHAT_ID):
+            logger.warning(f"Unauthorized approval attempt by chat_id {chat_id}")
+            await send_message(chat_id, "You are not authorized to approve or reject businesses.")
+            return {"ok": True}
+
+        # Find the business to get telegram_id
+        try:
+            def _q():
+                return supabase.table("businesses").select("telegram_id, name").eq("id", business_id).limit(1).execute()
+            resp = await asyncio.to_thread(_q)
+            data = resp.data if hasattr(resp, "data") else resp.get("data")
+            if not data:
+                logger.error(f"Business not found for id {business_id}")
+                await log_error_to_supabase(f"Business not found for id {business_id}")
+                await edit_message(chat_id, message_id, "Error: Business not found.")
+                return {"ok": True}
+            business = data[0]
+            user_chat_id = business["telegram_id"]
+            business_name = business["name"]
+        except Exception as e:
+            logger.error(f"Failed to fetch business {business_id}: {str(e)}")
+            await log_error_to_supabase(f"Failed to fetch business {business_id}: {str(e)}")
+            await edit_message(chat_id, message_id, "Error: Failed to fetch business details.")
+            return {"ok": True}
+
+        # Update business status
+        updated = await supabase_update_by_id_return("businesses", business_id, {"status": status})
+        if updated:
+            # Notify admin
+            await edit_message(
+                chat_id,
+                message_id,
+                f"Business '{business_name}' {status} successfully!",
+                reply_markup=None
+            )
+            # Notify user
+            await send_message(
+                user_chat_id,
+                f"Your business '{business_name}' has been {status}!"
+            )
+            logger.info(f"Business {business_id} set to {status}, user {user_chat_id} notified")
+        else:
+            await edit_message(
+                chat_id,
+                message_id,
+                f"Failed to {action} business '{business_name}'. Please try again.",
+                reply_markup=None
+            )
+            logger.error(f"Failed to update business {business_id} to {status}")
+            await log_error_to_supabase(f"Failed to update business {business_id} to {status}")
+        return {"ok": True}
 
     # Registration: Category selection
     if state.get("stage") in ["awaiting_category", "edit_category"] and callback_data.startswith("category:"):
@@ -978,6 +1037,9 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
         set_state(chat_id, state)
         return {"ok": True}
 
+    # Log unhandled callback
+    logger.warning(f"Unhandled callback query: {callback_data} from chat_id {chat_id}")
+    await log_error_to_supabase(f"Unhandled callback query: {callback_data} from chat_id {chat_id}")
     return {"ok": True}
 
 @app.get("/health")
