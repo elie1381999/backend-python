@@ -8,17 +8,13 @@ import logging
 import httpx
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from fastapi import Request, FastAPI
-from starlette.responses import Response, PlainTextResponse
+from fastapi import Request
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.DEBUG)
 logging.getLogger("httpcore").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
-
-# Initialize FastAPI app
-app = FastAPI()
 
 # Load environment variables
 load_dotenv()
@@ -224,31 +220,20 @@ async def initialize_bot():
         except Exception as e:
             logger.error(f"Failed to set menu button or commands: {str(e)}", exc_info=True)
 
-@app.post("/hook/business_bot")
-async def webhook_handler(request: Request) -> Response:
+async def webhook_handler(request: Request):
     try:
         update = await request.json()
-        if not update:
-            logger.error("Received empty update from Telegram")
-            return Response(status_code=200)
-        await initialize_bot()
-        message = update.get("message")
-        if message:
-            await handle_message_update(message)
-        callback_query = update.get("callback_query")
-        if callback_query:
-            await handle_callback_query(callback_query)
-        return Response(status_code=200)
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON in webhook", exc_info=True)
-        return Response(status_code=200)
     except Exception as e:
-        logger.error(f"Error processing webhook update: {str(e)}", exc_info=True)
-        return Response(status_code=200)
-
-@app.get("/health")
-async def health() -> PlainTextResponse:
-    return PlainTextResponse("OK", status_code=200)
+        logger.error(f"Invalid JSON in webhook: {str(e)}", exc_info=True)
+        return {"ok": True}
+    await initialize_bot()
+    message = update.get("message")
+    if message:
+        return await handle_message_update(message)
+    callback_query = update.get("callback_query")
+    if callback_query:
+        return await handle_callback_query(callback_query)
+    return {"ok": True}
 
 async def handle_message_update(message: Dict[str, Any]):
     chat_id = message.get("chat", {}).get("id")
@@ -283,7 +268,7 @@ async def handle_message_update(message: Dict[str, Any]):
     if text.lower() == "/register":
         business = await supabase_find_business(chat_id)
         if business:
-            await send_message(chat_id, f"Your business is already registered (status: {business['status']}).")
+            await send_message(chat_id, "You’ve already registered! Use /add_discount to add offers.")
             return {"ok": True}
         state = {"stage": "awaiting_name", "data": {"telegram_id": chat_id, "prices": {}, "work_days": []}, "entry_id": None}
         await send_message(chat_id, "Enter your business name:")
@@ -300,7 +285,7 @@ async def handle_message_update(message: Dict[str, Any]):
             await send_message(chat_id, "Your business is not yet approved.")
             return {"ok": True}
         state = {"stage": "awaiting_discount_name", "data": {"business_id": business["id"]}, "entry_id": None}
-        await send_message(chat_id, "Enter the discount/giveaway name (e.g., 'Summer Special' or 'Free Manicure'):")
+        await send_message(chat_id, "Enter the discount/giveaway name (e.g., '20% Off Nail Art'):")
         set_state(chat_id, state)
         return {"ok": True}
 
@@ -367,19 +352,6 @@ async def handle_message_update(message: Dict[str, Any]):
         set_state(chat_id, state)
         return {"ok": True}
 
-    if state.get("stage") == "awaiting_discount_percentage":
-        try:
-            percentage = int(text)
-            if not 1 <= percentage <= 100:
-                await send_message(chat_id, "Please enter a valid discount percentage (1-100):")
-                return {"ok": True}
-            state["data"]["discount_percentage"] = percentage
-            await submit_discount(chat_id, state, "discount")
-            return {"ok": True}
-        except ValueError:
-            await send_message(chat_id, "Please enter a valid number for discount percentage.")
-        return {"ok": True}
-
     return {"ok": True}
 
 async def submit_business_registration(chat_id: int, state: Dict[str, Any]):
@@ -405,35 +377,25 @@ async def submit_business_registration(chat_id: int, state: Dict[str, Any]):
 
 async def submit_discount(chat_id: int, state: Dict[str, Any], discount_type: str):
     try:
-        table = "discounts" if discount_type == "discount" else "giveaways"
         state["data"]["business_type"] = discount_type
         state["data"]["active"] = False  # Pending approval
         state["data"]["created_at"] = now_iso()
         state["data"]["updated_at"] = now_iso()
-        entry = await supabase_insert_return(table, state["data"])
-        if not entry:
-            await send_message(chat_id, f"Failed to submit {discount_type}. Please try again.")
+        giveaway = await supabase_insert_return("giveaways", state["data"])
+        if not giveaway:
+            await send_message(chat_id, "Failed to submit discount/giveaway. Please try again.")
             return
-        await send_message(chat_id, f"{discount_type.capitalize()} submitted! Awaiting admin approval.")
-        admin_message = (
-            f"New {discount_type} submission:\n"
-            f"Name: {entry['name']}\n"
-            f"Category: {entry['category']}\n"
-            f"Business ID: {entry['business_id']}\n"
-        )
-        if discount_type == "discount":
-            admin_message += f"Discount Percentage: {entry['discount_percentage']}%\n"
+        await send_message(chat_id, "Discount/giveaway submitted! Awaiting admin approval.")
         await send_admin_message(
-            admin_message,
+            f"New {discount_type} submission:\nName: {giveaway['name']}\nCategory: {giveaway['category']}\nBusiness ID: {giveaway['business_id']}",
             reply_markup={"inline_keyboard": [
-                [{"text": "Approve", "callback_data": f"giveaway_approve:{entry['id']}" if table == 'giveaways' else f"discount_approve:{entry['id']}"},
-                 {"text": "Reject", "callback_data": f"giveaway_reject:{entry['id']}" if table == 'giveaways' else f"discount_reject:{entry['id']}"}]
+                [{"text": "Approve", "callback_data": f"giveaway_approve:{giveaway['id']}"}, {"text": "Reject", "callback_data": f"giveaway_reject:{giveaway['id']}"}]
             ]}
         )
         USER_STATES.pop(chat_id, None)
     except Exception as e:
-        logger.error(f"Failed to submit {discount_type} for chat_id {chat_id}: {str(e)}", exc_info=True)
-        await send_message(chat_id, f"Failed to submit {discount_type}. Please try again.")
+        logger.error(f"Failed to submit discount for chat_id {chat_id}: {str(e)}", exc_info=True)
+        await send_message(chat_id, "Failed to submit discount/giveaway. Please try again.")
 
 async def handle_callback_query(callback_query: Dict[str, Any]):
     chat_id = callback_query.get("from", {}).get("id")
@@ -498,30 +460,15 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             await send_message(chat_id, "Invalid category. Please choose again:", reply_markup=await create_category_keyboard())
             return {"ok": True}
         state["data"]["category"] = category
-        if state["data"].get("business_type") == "discount":
-            await send_message(chat_id, "Enter the discount percentage (1-100):")
-            state["stage"] = "awaiting_discount_percentage"
-        else:
-            await send_message(chat_id, "Is this a discount or giveaway?", reply_markup=await create_discount_type_keyboard())
-            state["stage"] = "awaiting_discount_type"
+        await send_message(chat_id, "Is this a discount or giveaway?", reply_markup=await create_discount_type_keyboard())
+        state["stage"] = "awaiting_discount_type"
         set_state(chat_id, state)
         return {"ok": True}
 
     # Handle discount type selection
     if state.get("stage") == "awaiting_discount_type" and callback_data.startswith("discount_type:"):
         discount_type = callback_data[len("discount_type:"):]
-        state["data"]["business_type"] = discount_type
-        if discount_type == "discount":
-            await send_message(chat_id, "Enter the discount percentage (1-100):")
-            state["stage"] = "awaiting_discount_percentage"
-        else:
-            await submit_discount(chat_id, state, discount_type)
-        set_state(chat_id, state)
+        await submit_discount(chat_id, state, discount_type)
         return {"ok": True}
 
     return {"ok": True}
-
-if __name__ == "__main__":
-    import uvicorn
-    asyncio.run(initialize_bot())
-    uvicorn.run(app, host="0.0.0.0", port=8000)
