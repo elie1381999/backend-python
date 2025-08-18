@@ -15,6 +15,7 @@ from utils import (
     supabase_update_by_id_return, supabase_find_business, initialize_bot,
     supabase_insert_feedback, INTERESTS, EMOJIS, STATE_TTL_SECONDS, ADMIN_CHAT_ID, BOT_TOKEN
 )
+from datetime import datetime  # Added for DOB parsing
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -34,7 +35,8 @@ if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, WEBHOOK_URL]):
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-USER_STATES: Dict konseDict[int, Dict[str, Any]] = {}
+# In-memory state
+USER_STATES: Dict[int, Dict[str, Any]] = {}
 
 @app.post("/hook/central_bot")
 async def webhook_handler(request: Request) -> Response:
@@ -406,7 +408,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
 
     # Delegate points and discounts/giveaways handling
     if registered:
-        await handle_points_and_discounts(chat_id, callback_data, message_id, registered)
+        await handle_points_and_discounts(chat_id, callback_data, message_id, registered, supabase)
         return {"ok": True}
 
     return {"ok": True}
@@ -415,7 +417,6 @@ if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
 
 
 
