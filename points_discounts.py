@@ -1,3 +1,4 @@
+'''
 import logging
 import asyncio
 from typing import Dict, Any, Optional
@@ -331,3 +332,4 @@ async def handle_points_and_discounts(
             reply_markup=create_main_menu_keyboard()
         )
         return {"ok": True}
+'''
