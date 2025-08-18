@@ -2,6 +2,278 @@ import os
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional, List
+import logging
+import httpx
+from dotenv import load_dotenv
+from supabase import create_client, Client
+from fastapi import Request, FastAPI
+from starlette.responses import Response, PlainTextResponse
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("httpcore").setLevel(logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
+app = FastAPI()
+
+# Load environment variables
+load_dotenv()
+BOT_TOKEN = os.getenv("BUSINESS_BOT_TOKEN")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+CENTRAL_BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
+
+if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, CENTRAL_BOT_TOKEN]):
+    raise RuntimeError("BUSINESS_BOT_TOKEN / SUPABASE_URL / SUPABASE_KEY / ADMIN_CHAT_ID / CENTRAL_BOT_TOKEN must be set in .env")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# In-memory state
+USER_STATES: Dict[int, Dict[str, Any]] = {}
+STATE_TTL_SECONDS = 30 * 60  # 30 minutes
+CATEGORIES = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining"]
+WEEK_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def set_state(chat_id: int, state: Dict[str, Any]):
+    state["updated_at"] = now_iso()
+    USER_STATES[chat_id] = state
+
+def get_state(chat_id: int) -> Optional[Dict[str, Any]]:
+    st = USER_STATES.get(chat_id)
+    if not st:
+        return None
+    try:
+        updated = datetime.fromisoformat(st.get("updated_at"))
+        if (datetime.now(timezone.utc) - updated).total_seconds() > STATE_TTL_SECONDS:
+            USER_STATES.pop(chat_id, None)
+            return None
+    except Exception:
+        USER_STATES.pop(chat_id, None)
+        return None
+    return st
+
+async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, retries: int = 3):
+    if not chat_id:
+        logger.error("Invalid chat_id for send_message")
+        return {"ok": False, "error": "Invalid chat_id"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        for attempt in range(retries):
+            try:
+                logger.debug(f"Sending message to chat_id {chat_id} (attempt {attempt + 1}): {text}")
+                response = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json=payload
+                )
+                response.raise_for_status()
+                logger.info(f"Sent message to chat_id {chat_id}: {text}")
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Failed to send message: HTTP {e.response.status_code} - {e.response.text}")
+                if e.response.status_code == 400 and "chat not found" in e.response.text.lower():
+                    return {"ok": False, "error": "Chat not found"}
+                if e.response.status_code == 429:
+                    retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    await asyncio.sleep(retry_after)
+                    continue
+                return {"ok": False, "error": f"HTTP {e.response.status_code}"}
+            except Exception as e:
+                logger.error(f"Failed to send message: {str(e)}", exc_info=True)
+                if attempt < retries - 1:
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+        logger.error(f"Failed to send message to chat_id {chat_id} after {retries} attempts")
+        return {"ok": False, "error": "Max retries reached"}
+
+async def edit_message(chat_id: int, message_id: int, text: str, reply_markup: Optional[dict] = None, retries: int = 3):
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        for attempt in range(retries):
+            try:
+                logger.debug(f"Editing message {message_id} in chat_id {chat_id} (attempt {attempt + 1}): {text}")
+                response = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                    json=payload
+                )
+                response.raise_for_status()
+                logger.info(f"Edited message {message_id} in chat_id {chat_id}: {text}")
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Failed to edit message: HTTP {e.response.status_code} - {e.response.text}")
+                if e.response.status_code == 429:
+                    retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    await asyncio.sleep(retry_after)
+                    continue
+                return {"ok": False, "error": f"HTTP {e.response.status_code}"}
+            except Exception as e:
+                logger.error(f"Failed to edit message: {str(e)}", exc_info=True)
+                if attempt < retries - 1:
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+        logger.error(f"Failed to edit message {message_id} in chat_id {chat_id} after {retries} attempts")
+        return {"ok": False, "error": "Max retries reached"}
+
+async def send_admin_message(text: str, reply_markup: Optional[dict] = None, retries: int = 3):
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        payload = {"chat_id": int(ADMIN_CHAT_ID), "text": text, "parse_mode": "Markdown"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        for attempt in range(retries):
+            try:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{CENTRAL_BOT_TOKEN}/sendMessage",
+                    json=payload
+                )
+                response.raise_for_status()
+                logger.info(f"Sent admin message to {ADMIN_CHAT_ID}: {text}")
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Failed to send admin message: HTTP {e.response.status_code}")
+                if e.response.status_code == 429:
+                    retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    await asyncio.sleep(retry_after)
+                    continue
+                return {"ok": False}
+            except Exception as e:
+                logger.error(f"Failed to send admin message: {str(e)}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+        logger.error(f"Failed to send admin message after {retries} attempts")
+        return {"ok": False}
+
+async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str, Any]]:
+    payload['created_at'] = now_iso()  # Explicitly add created_at to payload
+    payload['updated_at'] = now_iso()  # Explicitly add updated_at to payload
+    try:
+        def _ins():
+            return supabase.table(table).insert(payload).execute()
+        resp = await asyncio.to_thread(_ins)
+        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        if not data:
+            logger.error(f"Failed to insert into {table}: no data returned")
+            return None
+        logger.info(f"Inserted into {table}: {data[0]}")
+        return data[0]
+    except Exception as e:
+        logger.error(f"supabase_insert_return failed for table {table}: {str(e)}", exc_info=True)
+        return None
+
+async def supabase_find_business(chat_id: int) -> Optional[Dict[str, Any]]:
+    try:
+        def _q():
+            return supabase.table("businesses").select("*").eq("telegram_id", chat_id).limit(1).execute()
+        resp = await asyncio.to_thread(_q)
+        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        if not data:
+            logger.info(f"No business found for chat_id {chat_id}")
+            return None
+        return data[0]
+    except Exception as e:
+        logger.error(f"supabase_find_business failed for chat_id {chat_id}: {str(e)}", exc_info=True)
+        return None
+
+async def webhook_handler(request: Request):
+    try:
+        update = await request.json()
+        if not update:
+            logger.error("Received empty update from Telegram")
+            return Response(status_code=200)
+        await initialize_bot()
+        message = update.get("message")
+        if message:
+            await handle_message_update(message)
+        callback_query = update.get("callback_query")
+        if callback_query:
+            await handle_callback_query(callback_query)
+        return Response(status_code=200)
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON in webhook", exc_info=True)
+        return Response(status_code=200)
+    except Exception as e:
+        logger.error(f"Error processing webhook update: {str(e)}", exc_info=True)
+        return Response(status_code=200)
+
+@app.get("/health")
+async def health() -> PlainTextResponse:
+    return PlainTextResponse("OK", status_code=200)
+
+async def handle_message_update(message: Dict[str, Any]):
+    chat_id = message.get("chat", {}).get("id")
+    if not chat_id:
+        logger.error("No chat_id in message")
+        return {"ok": True}
+    text = (message.get("text") or "").strip()
+    state = get_state(chat_id) or {}
+
+    # Handle /start
+    if text.lower() == "/start":
+        business = await supabase_find_business(chat_id)
+        if business:
+            if business["status"] == "approved":
+                await send_message(chat_id, "Your business is approved! You can now add discounts and giveaways.")
+            else:
+                await send_message(chat_id, "Your business registration is pending approval.")
+            return {"ok": True}
+        await send_message(chat_id, "Welcome! Register your business with /register.")
+        return {"ok": True}
+
+    # Handle /register
+    if text.lower() == "/register":
+        business = await supabase_find_business(chat_id)
+        if business:
+            await send_message(chat_id, "You’ve already registered!")
+            return {"ok": True}
+        state = {"stage": "awaiting_name", "data": {"telegram_id": chat_id, "prices": {}, "work_days": []}, "entry_id": None}
+        await send_message(chat_id, "Enter your business name:")
+        set_state(chat_id, state)
+        return {"ok": True}
+
+    # Handle registration steps (as in your code)
+    if state.get("stage") == "awaiting_name":
+        state["data"]["name"] = text
+        await send_message(chat_id, "Choose your business category:", reply_markup=await create_category_keyboard())
+        state["stage"] = "awaiting_category"
+        set_state(chat_id, state)
+        return {"ok": True}
+
+    # (Other registration steps remain the same)
+
+    return {"ok": True}
+
+# (Rest of the code remains the same as your provided version, with the fixes applied to supabase_insert_return and send_message)
+
+if __name__ == "__main__":
+    import uvicorn
+    asyncio.run(initialize_bot())
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
+
+
+
+
+
+
+
+
+'''import os
+import asyncio
+import json
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 import logging
@@ -795,3 +1067,4 @@ if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=8000)
+'''
