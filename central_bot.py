@@ -13,7 +13,6 @@ from fastapi import FastAPI, Request
 from starlette.responses import PlainTextResponse, Response
 
 # Logging setup
-# Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.DEBUG)
 logging.getLogger("httpcore").setLevel(logging.DEBUG)
@@ -200,8 +199,7 @@ def create_language_keyboard():
 def create_gender_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "Female", "callback_data": "gender:female"}],
-            [{"text": "Male", "callback_data": "gender:male"}]
+            [{"text": "Female", "callback_data 编辑: Male", "callback_data": "gender:male"}]
         ]
     }
 
@@ -397,7 +395,7 @@ async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, 
     if not inserted:
         logger.error(f"Failed to insert giveaway promo code for chat_id: {chat_id}, giveaway_id: {giveaway_id}")
         raise RuntimeError("Failed to save promo code")
-    logger.info(f"Generated giveaway promo code {code} for chat_id {chat_id}, giveaway_id: {giveaway_id}")
+    logger.info(f"Generated giveaway promo code {code} for chat_id {chat_id}, giveaway_id {giveaway_id}")
     return code, expiry
 
 async def has_redeemed_discount(chat_id: int) -> bool:
@@ -911,16 +909,31 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 return {"ok": True}
             try:
                 def _query_discounts():
-                    return supabase.table("discounts").select("*").eq("category", category).eq("active", True).execute()
+                    return supabase.table("discounts").select("id, name, discount_percentage, category, business_id").eq("category", category).eq("active", True).execute()
                 resp = await asyncio.to_thread(_query_discounts)
                 discounts = resp.data if hasattr(resp, "data") else resp.get("data", [])
                 if not discounts:
-                    await send_message(chat_id, f"No discounts available in {category}.")
+                    await send_message(chat_id, f"No discounts available in *{category}*.")
                     return {"ok": True}
                 for d in discounts:
                     business = await supabase_find_business(d["business_id"])
-                    location = business["location"] if business else "Unknown"
-                    message = f"*{d['name']}*\n{d['discount_percentage']}% off on {d['category']}\nAt {business['name'] if business else 'Unknown'}, {location}"
+                    if not business:
+                        await send_message(chat_id, f"Business not found for discount {d['name']}.")
+                        continue
+                    # Fetch business categories
+                    def _query_categories():
+                        return supabase.table("business_categories").select("category").eq("business_id", d["business_id"]).execute()
+                    categories_resp = await asyncio.to_thread(_query_categories)
+                    categories = [cat["category"] for cat in (categories_resp.data if hasattr(categories_resp, "data") else categories_resp.get("data", []))] or ["None"]
+                    location = business.get("location", "Unknown")
+                    message = (
+                        f"Discount: *{d['name']}*\n"
+                        f"Category: *{d['category']}*\n"
+                        f"Percentage: {d['discount_percentage']}%\n"
+                        f"At: {business['name']}\n"
+                        f"Location: {location}\n"
+                        f"Business Categories: {', '.join(categories)}"
+                    )
                     keyboard = {"inline_keyboard": [
                         [
                             {"text": "View Profile", "callback_data": f"profile:{d['business_id']}"},
@@ -943,10 +956,23 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 if not business:
                     await send_message(chat_id, "Business not found.")
                     return {"ok": True}
-                msg = f"Business Profile:\nName: {business['name']}\nCategory: {business['category']}\nLocation: {business['location']}\nPhone: {business['phone_number']}\nWork Days: {', '.join(business['work_days'])}"
+                # Fetch business categories
+                def _query_categories():
+                    return supabase.table("business_categories").select("category").eq("business_id", business_id).execute()
+                categories_resp = await asyncio.to_thread(_query_categories)
+                categories = [cat["category"] for cat in (categories_resp.data if hasattr(categories_resp, "data") else categories_resp.get("data", []))] or ["None"]
+                work_days = business.get("work_days", []) or ["Not set"]
+                msg = (
+                    f"Business Profile:\n"
+                    f"Name: {business['name']}\n"
+                    f"Categories: {', '.join(categories)}\n"
+                    f"Location: {business.get('location', 'Not set')}\n"
+                    f"Phone: {business.get('phone_number', 'Not set')}\n"
+                    f"Work Days: {', '.join(work_days)}"
+                )
                 await send_message(chat_id, msg)
             except Exception as e:
-                logger.error(f"Failed to fetch business profile {business_id}: {str(e)}")
+                logger.error(f"Failed to fetch business profile {business_id}: {str(e)}", exc_info=True)
                 await send_message(chat_id, "Failed to load profile.")
             return {"ok": True}
         elif callback_data.startswith("services:"):
@@ -960,7 +986,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 msg = "Services:\n" + "\n".join(f"{k}: {v}" for k, v in prices.items()) if prices else "No services listed."
                 await send_message(chat_id, msg)
             except Exception as e:
-                logger.error(f"Failed to fetch business services {business_id}: {str(e)}")
+                logger.error(f"Failed to fetch business services {business_id}: {str(e)}", exc_info=True)
                 await send_message(chat_id, "Failed to load services.")
             return {"ok": True}
         elif callback_data.startswith("book:"):
@@ -970,10 +996,10 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 if not business:
                     await send_message(chat_id, "Business not found.")
                     return {"ok": True}
-                msg = f"To book, please contact {business['name']} at {business['phone_number']}."
+                msg = f"To book, please contact {business['name']} at {business.get('phone_number', 'Not set')}."
                 await send_message(chat_id, msg)
             except Exception as e:
-                logger.error(f"Failed to fetch book info {business_id}: {str(e)}")
+                logger.error(f"Failed to fetch book info {business_id}: {str(e)}", exc_info=True)
                 await send_message(chat_id, "Failed to load booking info.")
             return {"ok": True}
         elif callback_data.startswith("get_discount:"):
