@@ -1364,7 +1364,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             await log_error_to_supabase(f"Failed to update discount {discount_id} to active={active}")
         return {"ok": True}
 
-    # Registration: Category selection
+     # Registration: Category selection
     if state.get("stage") in ["awaiting_categories", "edit_categories"] and callback_data.startswith("category:"):
         category = callback_data[len("category:"):]
         if category == "confirm":
@@ -1391,8 +1391,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                     await log_error_to_supabase(f"Failed to delete old categories for business {state['entry_id']}: {str(e)}")
                     await send_message(chat_id, "Failed to update categories due to a database error. Please try again.", parse_mode="Markdown")
                     return {"ok": True}
-
-          for category in state["data"]["categories"]:
+                for category in state["data"]["categories"]:
                     result = await supabase_insert_return("business_categories", {
                         "business_id": state["entry_id"],
                         "category": category
