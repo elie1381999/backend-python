@@ -1,4 +1,4 @@
-import os
+'''import os
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -336,3 +336,4 @@ async def supabase_find_giveaway(giveaway_id: str, supabase: Client) -> Optional
 
 # In-memory state
 USER_STATES: Dict[int, Dict[str, Any]] = {}
+'''
