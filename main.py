@@ -34,7 +34,6 @@ if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, WEBHOOK_URL]):
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# In-memory state
 USER_STATES: Dict konseDict[int, Dict[str, Any]] = {}
 
 @app.post("/hook/central_bot")
