@@ -5,7 +5,6 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 import logging
-import httpx
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from fastapi import FastAPI, Request
@@ -73,6 +72,19 @@ def get_state(chat_id: int) -> Optional[Dict[str, Any]]:
         USER_STATES.pop(chat_id, None)
         return None
     return state
+
+async def cleanup_states():
+    """Periodically clean up expired states."""
+    while True:
+        current_time = datetime.now(timezone.utc)
+        expired = [
+            chat_id for chat_id, state in USER_STATES.items()
+            if (current_time - datetime.fromisoformat(state.get("updated_at"))).total_seconds() > STATE_TTL_SECONDS
+        ]
+        for chat_id in expired:
+            USER_STATES.pop(chat_id, None)
+            logger.info(f"Cleaned up expired state for chat_id {chat_id}")
+        await asyncio.sleep(60)  # Check every minute
 
 async def log_error_to_supabase(error_message: str):
     """Log errors to Supabase bot_errors table."""
@@ -204,6 +216,8 @@ async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str
         error_message = str(e)
         if "Category" in error_message and "is not associated with business_id" in error_message:
             return {"error": "invalid_category", "message": error_message}
+        if "foreign_key_violation" in error_message.lower():
+            return {"error": "foreign_key_violation", "message": error_message}
         await log_error_to_supabase(f"supabase_insert_return failed for table {table}: {str(e)}")
         return None
 
@@ -226,8 +240,28 @@ async def supabase_update_by_id_return(table: str, entry_id: str, payload: dict)
         error_message = str(e)
         if "Category" in error_message and "is not associated with business_id" in error_message:
             return {"error": "invalid_category", "message": error_message}
+        if "foreign_key_violation" in error_message.lower():
+            return {"error": "foreign_key_violation", "message": error_message}
         await log_error_to_supabase(f"supabase_update_by_id_return failed for table {table}, id {entry_id}: {str(e)}")
         return None
+
+async def supabase_delete_by_id(table: str, entry_id: str) -> bool:
+    """Delete a record from Supabase by ID."""
+    try:
+        def _del():
+            return supabase.table(table).delete().eq("id", entry_id).execute()
+        resp = await asyncio.to_thread(_del)
+        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        if data:
+            logger.info(f"Deleted from {table} with id {entry_id}")
+            return True
+        logger.error(f"Failed to delete from {table} with id {entry_id}: no data returned")
+        await log_error_to_supabase(f"Failed to delete from {table} with id {entry_id}: no data returned")
+        return False
+    except Exception as e:
+        logger.error(f"supabase_delete_by_id failed for table {table}, id {entry_id}: {str(e)}", exc_info=True)
+        await log_error_to_supabase(f"supabase_delete_by_id failed for table {table}, id {entry_id}: {str(e)}")
+        return False
 
 async def supabase_find_business(chat_id: int) -> Optional[Dict[str, Any]]:
     """Find a business by chat_id in Supabase."""
@@ -325,6 +359,28 @@ async def create_service_category_keyboard(business_id: str) -> dict:
     buttons.append([{"text": "Skip", "callback_data": "service_category:skip"}])
     return {"inline_keyboard": buttons}
 
+async def create_service_selection_keyboard(services: List[Dict[str, Any]]) -> dict:
+    """Create inline keyboard for selecting a service to delete."""
+    if not services:
+        return {"inline_keyboard": [[{"text": "No services available", "callback_data": "none"}]]}
+    buttons = [
+        [{"text": f"{service['name']} ({service['category']}): ${service['price']}", "callback_data": f"delete_service:{service['id']}"}]
+        for service in services
+    ]
+    buttons.append([{"text": "Cancel", "callback_data": "delete_service:cancel"}])
+    return {"inline_keyboard": buttons}
+
+async def create_discount_selection_keyboard(discounts: List[Dict[str, Any]]) -> dict:
+    """Create inline keyboard for selecting a discount to delete."""
+    if not discounts:
+        return {"inline_keyboard": [[{"text": "No discounts available", "callback_data": "none"}]]}
+    buttons = [
+        [{"text": f"{discount['name']} ({discount['category']}, {discount['discount_percentage']}%): {'Active' if discount['active'] else 'Pending/Inactive'}", "callback_data": f"delete_discount:{discount['id']}"}]
+        for discount in discounts
+    ]
+    buttons.append([{"text": "Cancel", "callback_data": "delete_discount:cancel"}])
+    return {"inline_keyboard": buttons}
+
 async def initialize_bot():
     """Initialize bot by setting webhook and commands."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
@@ -372,6 +428,7 @@ async def initialize_bot():
                 {"command": "start", "description": "Start the bot"},
                 {"command": "register", "description": "Register your business"},
                 {"command": "add_discount", "description": "Add a discount"},
+                {"command": "delete_discount", "description": "Delete a discount"},
                 {"command": "edit_business", "description": "Edit your business details"},
                 {"command": "list_services", "description": "List your services"},
                 {"command": "list_discounts", "description": "List your discounts"},
@@ -427,7 +484,7 @@ async def handle_message_update(message: Dict[str, Any]):
         business = await supabase_find_business(chat_id)
         if business:
             if business["status"] == "approved":
-                await send_message(chat_id, "Your business is approved! Use /add_discount, /edit_business, /list_services, or /list_discounts.")
+                await send_message(chat_id, "Your business is approved! Use /add_discount, /delete_discount, /edit_business, /list_services, or /list_discounts.")
             else:
                 await send_message(chat_id, "Your business is pending approval. We'll notify you soon!")
         else:
@@ -488,6 +545,34 @@ async def handle_message_update(message: Dict[str, Any]):
         set_state(chat_id, state)
         return {"ok": True}
 
+    # /delete_discount
+    if text.lower() == "/delete_discount":
+        business = await supabase_find_business(chat_id)
+        if not business:
+            await send_message(chat_id, "Please register your business first with /register.")
+            return {"ok": True}
+        if business["status"] != "approved":
+            await send_message(chat_id, "Your business is not yet approved.")
+            return {"ok": True}
+        discounts = await supabase_get_discounts(business["id"])
+        if not discounts:
+            await send_message(chat_id, "No discounts found. Add discounts using /add_discount.")
+            return {"ok": True}
+        state = {
+            "stage": "awaiting_discount_deletion",
+            "data": {"business_id": business["id"]},
+            "entry_id": None
+        }
+        resp = await send_message(
+            chat_id,
+            "Select a discount to delete:",
+            reply_markup=await create_discount_selection_keyboard(discounts)
+        )
+        if resp.get("ok"):
+            state["temp_message_id"] = resp["result"]["message_id"]
+        set_state(chat_id, state)
+        return {"ok": True}
+
     # /edit_business
     if text.lower() == "/edit_business":
         business = await supabase_find_business(chat_id)
@@ -510,6 +595,7 @@ async def handle_message_update(message: Dict[str, Any]):
                     [{"text": "Location", "callback_data": "edit_field:location"}],
                     [{"text": "Work Days", "callback_data": "edit_field:work_days"}],
                     [{"text": "Services", "callback_data": "edit_field:services"}],
+                    [{"text": "Delete Services", "callback_data": "edit_field:delete_services"}],
                     [{"text": "Website", "callback_data": "edit_field:website"}],
                     [{"text": "Description", "callback_data": "edit_field:description"}]
                 ]
@@ -543,7 +629,8 @@ async def handle_message_update(message: Dict[str, Any]):
             await send_message(chat_id, "No discounts registered. Add discounts using /add_discount.")
             return {"ok": True}
         offers_text = [f"- {d['name']} ({d['category']}, {d['discount_percentage']}%): {'Active' if d['active'] else 'Pending/Inactive'}" for d in discounts]
-        await send_message(chat_id, f"Your discounts:\n{'\n'.join(offers_text)}")
+        offers_text_joined = '\n'.join(offers_text)
+        await send_message(chat_id, f"Your discounts:\n{offers_text_joined}")
         return {"ok": True}
 
     # Registration steps
@@ -618,14 +705,17 @@ async def handle_message_update(message: Dict[str, Any]):
                 "telegram_id": state["data"]["telegram_id"],
                 "status": "pending"
             })
-            if business:
-                business_id = business["id"]
-                state["data"]["business_id"] = business_id
-                state["entry_id"] = business_id
-            else:
+            if isinstance(business, dict) and business.get("error") == "foreign_key_violation":
+                await send_message(chat_id, f"Database error: {business['message']}. Please try again or contact support.")
+                USER_STATES.pop(chat_id, None)
+                return {"ok": True}
+            if not business:
                 await send_message(chat_id, "Failed to create business. Please try again.")
                 USER_STATES.pop(chat_id, None)
                 return {"ok": True}
+            business_id = business["id"]
+            state["data"]["business_id"] = business_id
+            state["entry_id"] = business_id
         categories = await supabase_get_business_categories(business_id)
         if not categories:
             await send_message(chat_id, "No categories found. Please add at least one category using /edit_business.")
@@ -689,6 +779,10 @@ async def handle_message_update(message: Dict[str, Any]):
                 state["stage"] = "awaiting_service_category"
                 set_state(chat_id, state)
                 return {"ok": True}
+            if isinstance(service, dict) and service.get("error") == "foreign_key_violation":
+                await send_message(chat_id, f"Database error: {service['message']}. Please try again or contact support.")
+                USER_STATES.pop(chat_id, None)
+                return {"ok": True}
             if service:
                 state["data"]["services"].append({
                     "name": service_name,
@@ -705,7 +799,7 @@ async def handle_message_update(message: Dict[str, Any]):
                 del state["temp_service_category"]
                 set_state(chat_id, state)
             else:
-                await send_message(chat_id, "Failed to add service. Please try again.")
+                await send_message(chat_id, "Failed to add service due to a database error. Please try again.")
         except ValueError:
             await send_message(chat_id, "Please enter a valid number for price (e.g., 50.00).")
         return {"ok": True}
@@ -758,12 +852,16 @@ async def handle_message_update(message: Dict[str, Any]):
             await send_message(chat_id, f"Business name too long. Please use {MAX_NAME_LENGTH} characters or fewer:")
             return {"ok": True}
         updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"name": text})
+        if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+            await send_message(chat_id, f"Database error: {updated['message']}. Please try again or contact support.")
+            USER_STATES.pop(chat_id, None)
+            return {"ok": True}
         if updated:
             await send_message(chat_id, "Business name updated successfully!")
             await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Name: {text}")
             USER_STATES.pop(chat_id, None)
         else:
-            await send_message(chat_id, "Failed to update business name. Please try again.")
+            await send_message(chat_id, "Failed to update business name due to a database error. Please try again.")
         return {"ok": True}
 
     if state.get("stage") == "edit_phone":
@@ -771,22 +869,30 @@ async def handle_message_update(message: Dict[str, Any]):
             await send_message(chat_id, "Please enter a valid phone number starting with + (e.g., +1234567890):")
             return {"ok": True}
         updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"phone_number": text})
+        if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+            await send_message(chat_id, f"Database error: {updated['message']}. Please try again or contact support.")
+            USER_STATES.pop(chat_id, None)
+            return {"ok": True}
         if updated:
             await send_message(chat_id, "Phone number updated successfully!")
             await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Phone: {text}")
             USER_STATES.pop(chat_id, None)
         else:
-            await send_message(chat_id, "Failed to update phone number. Please try again.")
+            await send_message(chat_id, "Failed to update phone number due to a database error. Please try again.")
         return {"ok": True}
 
     if state.get("stage") == "edit_location":
         updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"location": text})
+        if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+            await send_message(chat_id, f"Database error: {updated['message']}. Please try again or contact support.")
+            USER_STATES.pop(chat_id, None)
+            return {"ok": True}
         if updated:
             await send_message(chat_id, "Location updated successfully!")
             await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Location: {text}")
             USER_STATES.pop(chat_id, None)
         else:
-            await send_message(chat_id, "Failed to update location. Please try again.")
+            await send_message(chat_id, "Failed to update location due to a database error. Please try again.")
         return {"ok": True}
 
     if state.get("stage") == "edit_website":
@@ -798,12 +904,16 @@ async def handle_message_update(message: Dict[str, Any]):
                 return {"ok": True}
             website = text
         updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"website": website})
+        if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+            await send_message(chat_id, f"Database error: {updated['message']}. Please try again or contact support.")
+            USER_STATES.pop(chat_id, None)
+            return {"ok": True}
         if updated:
             await send_message(chat_id, "Website updated successfully!")
             await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Website: {website or 'None'}")
             USER_STATES.pop(chat_id, None)
         else:
-            await send_message(chat_id, "Failed to update website. Please try again.")
+            await send_message(chat_id, "Failed to update website due to a database error. Please try again.")
         return {"ok": True}
 
     if state.get("stage") == "edit_description":
@@ -812,12 +922,16 @@ async def handle_message_update(message: Dict[str, Any]):
             return {"ok": True}
         description = text if text.lower() != "none" else None
         updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"description": description})
+        if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+            await send_message(chat_id, f"Database error: {updated['message']}. Please try again or contact support.")
+            USER_STATES.pop(chat_id, None)
+            return {"ok": True}
         if updated:
             await send_message(chat_id, "Description updated successfully!")
             await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Description: {description or 'None'}")
             USER_STATES.pop(chat_id, None)
         else:
-            await send_message(chat_id, "Failed to update description. Please try again.")
+            await send_message(chat_id, "Failed to update description due to a database error. Please try again.")
         return {"ok": True}
 
     if state.get("stage") == "edit_service_category":
@@ -835,6 +949,7 @@ async def handle_message_update(message: Dict[str, Any]):
                         [{"text": "Location", "callback_data": "edit_field:location"}],
                         [{"text": "Work Days", "callback_data": "edit_field:work_days"}],
                         [{"text": "Services", "callback_data": "edit_field:services"}],
+                        [{"text": "Delete Services", "callback_data": "edit_field:delete_services"}],
                         [{"text": "Website", "callback_data": "edit_field:website"}],
                         [{"text": "Description", "callback_data": "edit_field:description"}]
                     ]
@@ -887,6 +1002,10 @@ async def handle_message_update(message: Dict[str, Any]):
                 state["stage"] = "edit_service_category"
                 set_state(chat_id, state)
                 return {"ok": True}
+            if isinstance(service, dict) and service.get("error") == "foreign_key_violation":
+                await send_message(chat_id, f"Database error: {service['message']}. Please try again or contact support.")
+                USER_STATES.pop(chat_id, None)
+                return {"ok": True}
             if service:
                 await send_message(chat_id, f"Service {service_name} ({service_category}) added with price ${price}!")
                 await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nService {service_name} ({service_category}): ${price}")
@@ -902,12 +1021,12 @@ async def handle_message_update(message: Dict[str, Any]):
                 del state["temp_service_category"]
                 set_state(chat_id, state)
             else:
-                await send_message(chat_id, "Failed to add service. Please try again.")
+                await send_message(chat_id, "Failed to add service due to a database error. Please try again.")
         except ValueError:
             await send_message(chat_id, "Please enter a valid number for price (e.g., 50.00).")
         return {"ok": True}
 
-    await send_message(chat_id, "Unknown command or state. Use /start, /register, /add_discount, /edit_business, /list_services, or /list_discounts.")
+    await send_message(chat_id, "Unknown command or state. Use /start, /register, /add_discount, /delete_discount, /edit_business, /list_services, or /list_discounts.")
     return {"ok": True}
 
 async def submit_business_registration(chat_id: int, state: Dict[str, Any]):
@@ -924,16 +1043,26 @@ async def submit_business_registration(chat_id: int, state: Dict[str, Any]):
             "telegram_id": state["data"]["telegram_id"],
             "status": state["data"]["status"]
         })
+        if isinstance(business, dict) and business.get("error") == "foreign_key_violation":
+            await send_message(chat_id, f"Database error: {business['message']}. Please try again or contact support.")
+            USER_STATES.pop(chat_id, None)
+            return
         if not business:
-            await send_message(chat_id, "Failed to register business. Please try again.")
+            await send_message(chat_id, "Failed to register business due to a database error. Please try again.")
             return
 
         # Insert categories
         for category in state["data"]["categories"]:
-            await supabase_insert_return("business_categories", {
+            result = await supabase_insert_return("business_categories", {
                 "business_id": business["id"],
                 "category": category
             })
+            if isinstance(result, dict) and result.get("error") == "foreign_key_violation":
+                await send_message(chat_id, f"Database error adding category '{category}': {result['message']}. Please try again.")
+                continue
+            if not result:
+                await send_message(chat_id, f"Failed to add category '{category}' due to a database error. Please try again.")
+                continue
 
         # Insert services
         for service in state["data"]["services"]:
@@ -946,8 +1075,11 @@ async def submit_business_registration(chat_id: int, state: Dict[str, Any]):
             if isinstance(result, dict) and result.get("error") == "invalid_category":
                 await send_message(chat_id, f"Error adding service '{service['name']}': {result['message']}. Please add the category using /edit_business.")
                 continue
+            if isinstance(result, dict) and result.get("error") == "foreign_key_violation":
+                await send_message(chat_id, f"Database error adding service '{service['name']}': {result['message']}. Please try again.")
+                continue
             if not result:
-                await send_message(chat_id, f"Failed to add service '{service['name']}'. Please try again.")
+                await send_message(chat_id, f"Failed to add service '{service['name']}' due to a database error. Please try again.")
                 continue
 
         await send_message(chat_id, "Business registered successfully! Awaiting admin approval.")
@@ -976,7 +1108,7 @@ async def submit_business_registration(chat_id: int, state: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Failed to register business for chat_id {chat_id}: {str(e)}", exc_info=True)
         await log_error_to_supabase(f"Failed to register business for chat_id {chat_id}: {str(e)}")
-        await send_message(chat_id, "Failed to register business. Please try again.")
+        await send_message(chat_id, "Failed to register business due to an unexpected error. Please try again.")
 
 async def submit_discount(chat_id: int, state: Dict[str, Any]):
     """Submit discount to Supabase and notify admin."""
@@ -995,8 +1127,12 @@ async def submit_discount(chat_id: int, state: Dict[str, Any]):
             state["stage"] = "awaiting_discount_category"
             set_state(chat_id, state)
             return
+        if isinstance(discount, dict) and discount.get("error") == "foreign_key_violation":
+            await send_message(chat_id, f"Database error: {discount['message']}. Please try again or contact support.")
+            USER_STATES.pop(chat_id, None)
+            return
         if not discount:
-            await send_message(chat_id, "Failed to submit discount. Please try again.")
+            await send_message(chat_id, "Failed to submit discount due to a database error. Please try again.")
             return
         await send_message(chat_id, "Discount submitted! Awaiting admin approval.")
         await send_admin_message(
@@ -1018,7 +1154,7 @@ async def submit_discount(chat_id: int, state: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Failed to submit discount for chat_id {chat_id}: {str(e)}", exc_info=True)
         await log_error_to_supabase(f"Failed to submit discount for chat_id {chat_id}: {str(e)}")
-        await send_message(chat_id, "Failed to submit discount. Please try again.")
+        await send_message(chat_id, "Failed to submit discount due to an unexpected error. Please try again.")
 
 async def handle_callback_query(callback_query: Dict[str, Any]):
     """Handle callback queries from inline keyboards."""
@@ -1063,6 +1199,9 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             return {"ok": True}
 
         updated = await supabase_update_by_id_return("businesses", business_id, {"status": status})
+        if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+            await edit_message(chat_id, message_id, f"Database error: {updated['message']}. Please try again or contact support.")
+            return {"ok": True}
         if updated:
             await edit_message(
                 chat_id,
@@ -1079,7 +1218,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             await edit_message(
                 chat_id,
                 message_id,
-                f"Failed to {action} business '{business_name}'. Please try again.",
+                f"Failed to {action} business '{business_name}' due to a database error. Please try again.",
                 reply_markup=None
             )
             logger.error(f"Failed to update business {business_id} to {status}")
@@ -1133,6 +1272,9 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             return {"ok": True}
 
         updated = await supabase_update_by_id_return("discounts", discount_id, {"active": active})
+        if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+            await edit_message(chat_id, message_id, f"Database error: {updated['message']}. Please try again or contact support.")
+            return {"ok": True}
         if updated:
             await edit_message(
                 chat_id,
@@ -1149,7 +1291,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             await edit_message(
                 chat_id,
                 message_id,
-                f"Failed to {action} discount '{discount_name}'. Please try again.",
+                f"Failed to {action} discount '{discount_name}' due to a database error. Please try again.",
                 reply_markup=None
             )
             logger.error(f"Failed to update discount {discount_id} to active={active}")
@@ -1180,14 +1322,20 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 except Exception as e:
                     logger.error(f"Failed to delete old categories for business {state['entry_id']}: {str(e)}")
                     await log_error_to_supabase(f"Failed to delete old categories for business {state['entry_id']}: {str(e)}")
-                    await send_message(chat_id, "Failed to update categories. Please try again.")
+                    await send_message(chat_id, "Failed to update categories due to a database error. Please try again.")
                     return {"ok": True}
 
                 for category in state["data"]["categories"]:
-                    await supabase_insert_return("business_categories", {
+                    result = await supabase_insert_return("business_categories", {
                         "business_id": state["entry_id"],
                         "category": category
                     })
+                    if isinstance(result, dict) and result.get("error") == "foreign_key_violation":
+                        await send_message(chat_id, f"Database error adding category '{category}': {result['message']}. Please try again.")
+                        continue
+                    if not result:
+                        await send_message(chat_id, f"Failed to add category '{category}' due to a database error. Please try again.")
+                        continue
                 await send_message(chat_id, "Categories updated successfully!")
                 await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Categories: {', '.join(state['data']['categories'])}")
                 USER_STATES.pop(chat_id, None)
@@ -1226,12 +1374,16 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 set_state(chat_id, state)
             else:  # edit_work_days
                 updated = await supabase_update_by_id_return("businesses", state["entry_id"], {"work_days": state["data"]["work_days"]})
+                if isinstance(updated, dict) and updated.get("error") == "foreign_key_violation":
+                    await send_message(chat_id, f"Database error: {updated['message']}. Please try again or contact support.")
+                    USER_STATES.pop(chat_id, None)
+                    return {"ok": True}
                 if updated:
                     await send_message(chat_id, "Work days updated successfully!")
                     await send_admin_message(f"Business updated:\nID: {state['entry_id']}\nNew Work Days: {', '.join(state['data']['work_days'])}")
                     USER_STATES.pop(chat_id, None)
                 else:
-                    await send_message(chat_id, "Failed to update work days. Please try again.")
+                    await send_message(chat_id, "Failed to update work days due to a database error. Please try again.")
             return {"ok": True}
         if day in WEEK_DAYS:
             selected = state["data"].get("work_days", [])
@@ -1285,6 +1437,7 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                             [{"text": "Location", "callback_data": "edit_field:location"}],
                             [{"text": "Work Days", "callback_data": "edit_field:work_days"}],
                             [{"text": "Services", "callback_data": "edit_field:services"}],
+                            [{"text": "Delete Services", "callback_data": "edit_field:delete_services"}],
                             [{"text": "Website", "callback_data": "edit_field:website"}],
                             [{"text": "Description", "callback_data": "edit_field:description"}]
                         ]
