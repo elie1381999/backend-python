@@ -7,10 +7,11 @@ from supabase import create_client, Client
 
 # Debug: Print directory contents to confirm file presence
 print("Directory contents:", os.listdir('.'))
+print("Central directory contents:", os.listdir('central'))
 
 # Import webhook handlers
 try:
-    from central_bot import webhook_handler as central_webhook_handler
+    from central.central_bot import webhook_handler as central_webhook_handler
 except ImportError as e:
     print(f"Failed to import central_bot: {e}")
     raise
@@ -95,10 +96,6 @@ def root():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
-
-
-
-
 
 
 
