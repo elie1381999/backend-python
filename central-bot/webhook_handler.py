@@ -1,3 +1,4 @@
+'''
 import os
 import asyncio
 import json
@@ -1009,3 +1010,4 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+'''
