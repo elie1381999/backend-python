@@ -1,6 +1,3 @@
-# =============================================
-# IMPORTS & INITIAL SETUP
-# =============================================
 import os
 import asyncio
 import json
