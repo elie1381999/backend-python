@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from utils import supabase_find_business, supabase_find_giveaway, supabase_update_by_id_return, send_message, notify_users, now_iso, safe_clear_markup, logger, uuid
+from central.utils import supabase_find_business, supabase_find_giveaway, supabase_update_by_id_return, send_message, notify_users, now_iso, safe_clear_markup, logger, uuid
 
 async def handle_admin_command(text: str, chat_id: int):
     if text.startswith("/approve_"):
