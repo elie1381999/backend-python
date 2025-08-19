@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import json
@@ -42,6 +41,26 @@ CATEGORIES = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casua
 STARTER_POINTS = 100
 STATE_TTL_SECONDS = 30 * 60  # 30 minutes
 EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
+
+# -------------------------
+# Points system params
+# -------------------------
+POINTS_SIGNUP = 20
+POINTS_PROFILE_COMPLETE = 40
+POINTS_VIEW_DISCOUNT = 5
+POINTS_CLAIM_PROMO = 10
+POINTS_BOOKING_CREATED = 15
+POINTS_BOOKING_VERIFIED = 200
+POINTS_REFERRAL_JOIN = 10
+POINTS_REFERRAL_VERIFIED = 100
+
+DAILY_POINTS_CAP = 2000  # maximum points a user can receive per UTC day
+TIER_THRESHOLDS = [
+    ("Bronze", 0),
+    ("Silver", 200),
+    ("Gold", 500),
+    ("Platinum", 1000),
+]
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -300,6 +319,102 @@ async def supabase_update_by_id_return(table: str, entry_id: str, payload: dict)
         logger.error(f"supabase_update_by_id_return failed for table {table}, id {entry_id}: {str(e)}", exc_info=True)
         return None
 
+# -------------------------
+# Points helpers
+# -------------------------
+def compute_tier(points: int) -> str:
+    tier = "Bronze"
+    for name, threshold in TIER_THRESHOLDS:
+        if points >= threshold:
+            tier = name
+    return tier
+
+async def get_points_awarded_today(user_id: str) -> int:
+    """Return sum of points awarded to user_id since UTC midnight."""
+    def _q():
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        return supabase.table("points_history").select("points").eq("user_id", user_id).gte("awarded_at", today_start).execute()
+    try:
+        resp = await asyncio.to_thread(_q)
+        rows = resp.data if hasattr(resp, "data") else resp.get("data", []) or []
+        return sum(int(r["points"]) for r in rows)
+    except Exception:
+        logger.exception("get_points_awarded_today failed")
+        return 0
+
+async def award_points(user_id: str, delta: int, reason: str, booking_id: Optional[str] = None) -> dict:
+    """
+    Award delta points to user_id:
+      - enforces DAILY_POINTS_CAP
+      - updates central_bot_leads.points and tier
+      - inserts points_history
+      - for 'booking_verified' attempts to award referrer bonus
+    Returns {'ok': True/False, ...}
+    """
+    if delta == 0:
+        return {"ok": True, "message": "no-op"}
+
+    # daily cap check
+    awarded_today = await get_points_awarded_today(user_id)
+    if awarded_today + abs(delta) > DAILY_POINTS_CAP:
+        logger.warning(f"Daily cap reached for user {user_id}: today {awarded_today}, trying to add {delta}")
+        return {"ok": False, "error": "daily_cap_reached"}
+
+    # fetch user row
+    def _get_user():
+        return supabase.table("central_bot_leads").select("*").eq("id", user_id).limit(1).execute()
+    try:
+        resp = await asyncio.to_thread(_get_user)
+        rows = resp.data if hasattr(resp, "data") else resp.get("data", []) or []
+        if not rows:
+            return {"ok": False, "error": "user_not_found"}
+        user = rows[0]
+    except Exception:
+        logger.exception("award_points: fetch user failed")
+        return {"ok": False, "error": "fetch_failed"}
+
+    old_points = int(user.get("points") or 0)
+    new_points = max(0, old_points + delta)
+    new_tier = compute_tier(new_points)
+
+    # update user row
+    def _upd_user():
+        return supabase.table("central_bot_leads").update({"points": new_points, "tier": new_tier, "last_login": now_iso()}).eq("id", user_id).execute()
+    try:
+        await asyncio.to_thread(_upd_user)
+    except Exception:
+        logger.exception("award_points: update failed")
+        return {"ok": False, "error": "update_failed"}
+
+    # insert history
+    hist = {"user_id": user_id, "points": delta, "reason": reason, "awarded_at": now_iso()}
+    await supabase_insert_return("points_history", hist)
+    logger.info(f"Awarded {delta} pts to user {user_id} for {reason} ({old_points} -> {new_points})")
+
+    # referral bonus (best-effort) for booking_verified
+    if reason == "booking_verified":
+        referred_by = user.get("referred_by")
+        if referred_by:
+            try:
+                # award referral bonus to referrer
+                await award_points(referred_by, POINTS_REFERRAL_VERIFIED, "referral_booking_verified", booking_id)
+            except Exception:
+                logger.exception("Failed to award referral bonus")
+
+    return {"ok": True, "old_points": old_points, "new_points": new_points, "tier": new_tier}
+
+async def has_history(user_id: str, reason: str) -> bool:
+    """Return True if points_history already has this reason for user (cheap single-row check)."""
+    def _q():
+        return supabase.table("points_history").select("id").eq("user_id", user_id).eq("reason", reason).limit(1).execute()
+    try:
+        resp = await asyncio.to_thread(_q)
+        rows = resp.data if hasattr(resp, "data") else resp.get("data", []) or []
+        return bool(rows)
+    except Exception:
+        logger.exception("has_history failed")
+        return False
+
 async def supabase_find_business(business_id: str) -> Optional[Dict[str, Any]]:
     def _q():
         return supabase.table("businesses").select("*").eq("id", business_id).limit(1).execute()
@@ -372,6 +487,16 @@ async def generate_discount_code(chat_id: int, business_id: str, discount_id: st
     if not inserted:
         logger.error(f"Failed to insert discount promo code for chat_id: {chat_id}, discount_id: {discount_id}")
         raise RuntimeError("Failed to save promo code")
+
+    # award points for claiming promo (best-effort; idempotency via has_history if desired)
+    try:
+        user_row = await supabase_find_registered(chat_id)
+        if user_row:
+            if not await has_history(user_row["id"], "claim_promo"):
+                await award_points(user_row["id"], POINTS_CLAIM_PROMO, "claim_promo")
+    except Exception:
+        logger.exception("Failed to award claim promo points")
+
     logger.info(f"Generated discount promo code {code} for chat_id {chat_id}, discount_id {discount_id}")
     return code, expiry
 
@@ -474,6 +599,9 @@ async def webhook_handler(request: Request) -> Response:
 async def health() -> PlainTextResponse:
     return PlainTextResponse("OK", status_code=200)
 
+# Optional verification key for business / partner calls (not required)
+VERIFY_KEY = os.getenv("VERIFY_KEY")
+
 async def handle_message_update(message: Dict[str, Any]):
     chat_id = message.get("chat", {}).get("id")
     if not chat_id:
@@ -545,6 +673,18 @@ async def handle_message_update(message: Dict[str, Any]):
         if entry_id:
             await supabase_update_by_id_return("central_bot_leads", entry_id, {"phone_number": phone_number})
         registered = await supabase_find_registered(chat_id)
+        # If user now has both phone and dob -> award profile-complete points (idempotent)
+        try:
+            if registered:
+                # fetch fresh row
+                user_row = await supabase_find_registered(chat_id)
+                if user_row and user_row.get("dob") and user_row.get("phone_number"):
+                    user_id = user_row["id"]
+                    if not await has_history(user_id, "profile_complete"):
+                        await award_points(user_id, POINTS_PROFILE_COMPLETE, "profile_complete")
+        except Exception:
+            logger.exception("Failed during profile completion points flow")
+
         if registered and not registered.get("dob"):
             await send_message(chat_id, "Enter your birthdate (YYYY-MM-DD, e.g., 1995-06-22) or /skip:")
             state["stage"] = "awaiting_dob_profile"
@@ -608,6 +748,14 @@ async def handle_message_update(message: Dict[str, Any]):
             if entry_id:
                 await supabase_update_by_id_return("central_bot_leads", entry_id, {"dob": state["data"]["dob"]})
             registered = await supabase_find_registered(chat_id)
+            # If user now has phone and dob -> award profile complete
+            try:
+                if registered and registered.get("phone_number") and registered.get("dob"):
+                    if not await has_history(registered["id"], "profile_complete"):
+                        await award_points(registered["id"], POINTS_PROFILE_COMPLETE, "profile_complete")
+            except Exception:
+                logger.exception("Failed awarding profile_complete after dob update")
+
             interests = registered.get("interests", []) or []
             interests_text = ", ".join(f"{EMOJIS[i]} {interest}" for i, interest in enumerate(interests)) if interests else "Not set"
             await send_message(chat_id, f"Profile:\nPhone: {registered.get('phone_number', 'Not set')}\nDOB: {registered.get('dob', 'Not set')}\nGender: {registered.get('gender', 'Not set')}\nYour interests for this month are: {interests_text}")
@@ -828,11 +976,30 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             await send_message(chat_id, "Interests saved! Finalizing registration...")
             entry_id = state.get("entry_id")
             if entry_id:
+                # Remove direct points update; use award_points to handle tier & history
                 await supabase_update_by_id_return("central_bot_leads", entry_id, {
                     "interests": selected,
-                    "is_draft": False,
-                    "points": STARTER_POINTS
+                    "is_draft": False
                 })
+                try:
+                    # award starter points (idempotent via history check)
+                    if not await has_history(entry_id, "signup"):
+                        await award_points(entry_id, STARTER_POINTS, "signup")
+                    # if referred_by present in state (and looks like uuid), set it and award referrer join points
+                    referred = state.get("referred_by")
+                    if referred:
+                        try:
+                            # ensure it's a valid UUID of another user
+                            ref_uuid = str(uuid.UUID(referred))
+                            # set referred_by column on the new user (best effort)
+                            await supabase_update_by_id_return("central_bot_leads", entry_id, {"referred_by": ref_uuid})
+                            # award referral join points to referrer (idempotent)
+                            if not await has_history(ref_uuid, "referral_join"):
+                                await award_points(ref_uuid, POINTS_REFERRAL_JOIN, "referral_join")
+                        except Exception:
+                            logger.debug("referred_by value is not a user UUID or awarding failed; skipping referral join")
+                except Exception:
+                    logger.exception("Failed awarding signup or referral points")
             await send_message(chat_id, f"Congrats! You've earned {STARTER_POINTS} points. Explore options:", reply_markup=create_main_menu_keyboard())
             if chat_id in USER_STATES:
                 del USER_STATES[chat_id]
@@ -1000,8 +1167,30 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
                 if not business:
                     await send_message(chat_id, "Business not found.")
                     return {"ok": True}
-                msg = f"To book, please contact {business['name']} at {business.get('phone_number', 'Not set')}."
-                await send_message(chat_id, msg)
+                # If we have a registered user, create a booking record (pending) and award booking-created points
+                if registered:
+                    try:
+                        booking_payload = {
+                            "user_id": registered["id"],
+                            "business_id": business_id,
+                            "booking_date": now_iso(),
+                            "status": "pending",
+                            "points_awarded": False,
+                            "referral_awarded": False
+                        }
+                        created_booking = await supabase_insert_return("user_bookings", booking_payload)
+                        if created_booking:
+                            # award small points for creating booking action (idempotency by history check)
+                            if not await has_history(registered["id"], f"booking_created:{created_booking['id']}"):
+                                await award_points(registered["id"], POINTS_BOOKING_CREATED, f"booking_created:{created_booking['id']}", created_booking["id"])
+                            await send_message(chat_id, f"Booking request created (ref: {created_booking['id']}). To confirm, contact {business['name']} at {business.get('phone_number', 'Not set')}.")
+                        else:
+                            await send_message(chat_id, f"Booking: Please contact {business['name']} at {business.get('phone_number', 'Not set')}.")
+                    except Exception:
+                        logger.exception("Failed to create booking in DB")
+                        await send_message(chat_id, f"Booking: Please contact {business['name']} at {business.get('phone_number', 'Not set')}.")
+                else:
+                    await send_message(chat_id, f"To book, please contact {business['name']} at {business.get('phone_number', 'Not set')}.")
             except Exception as e:
                 logger.error(f"Failed to fetch book info {business_id}: {str(e)}", exc_info=True)
                 await send_message(chat_id, "Failed to load booking info.")
@@ -1113,6 +1302,117 @@ async def handle_callback_query(callback_query: Dict[str, Any]):
             return {"ok": True}
 
     return {"ok": True}
+
+# -------------------------
+# Booking verification endpoint (businesses call this to verify promo & award points)
+# -------------------------
+@app.post("/verify_booking")
+async def verify_booking(request: Request):
+    """
+    Body JSON expected:
+      { "promo_code": "<code>", "business_id": "<uuid>" }
+    Header:
+      x-verify-key: optional secret (if VERIFY_KEY set, must match)
+    Response: JSON success / error
+    Notes:
+      - This endpoint will look up user_giveaways first then user_discounts.
+      - If a matching entry is found, it'll mark or create a user_bookings entry as completed
+        and award POINTS_BOOKING_VERIFIED to the user (idempotent using a unique reason).
+    """
+    if VERIFY_KEY:
+        provided = request.headers.get("x-verify-key")
+        if provided != VERIFY_KEY:
+            return PlainTextResponse("Forbidden", status_code=403)
+    try:
+        body = await request.json()
+        promo_code = body.get("promo_code")
+        business_id = body.get("business_id")
+        if not promo_code or not business_id:
+            return PlainTextResponse("promo_code and business_id required", status_code=400)
+        # Try to find giveaway match first
+        def _q_giveaway():
+            return supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+        resp = await asyncio.to_thread(_q_giveaway)
+        ug = resp.data[0] if (hasattr(resp, "data") and resp.data) else None
+
+        found_row = None
+        table_name = None
+        if ug:
+            found_row = ug
+            table_name = "user_giveaways"
+        else:
+            # fallback to discounts
+            def _q_disc():
+                return supabase.table("user_discounts").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+            resp2 = await asyncio.to_thread(_q_disc)
+            ud = resp2.data[0] if (hasattr(resp2, "data") and resp2.data) else None
+            if ud:
+                found_row = ud
+                table_name = "user_discounts"
+
+        if not found_row:
+            return PlainTextResponse("Promo not found", status_code=404)
+
+        telegram_id = found_row.get("telegram_id")
+        if not telegram_id:
+            return PlainTextResponse("No telegram_id for promo", status_code=400)
+
+        # find user id
+        def _q_user():
+            return supabase.table("central_bot_leads").select("*").eq("telegram_id", telegram_id).limit(1).execute()
+        resp_user = await asyncio.to_thread(_q_user)
+        users = resp_user.data if hasattr(resp_user, "data") else resp_user.get("data", []) or []
+        if not users:
+            return PlainTextResponse("User not found", status_code=404)
+        user = users[0]
+        user_id = user["id"]
+
+        # create or update booking record to completed
+        def _find_booking():
+            return supabase.table("user_bookings").select("*").eq("user_id", user_id).eq("business_id", business_id).limit(1).execute()
+        resp_b = await asyncio.to_thread(_find_booking)
+        booking = resp_b.data[0] if (hasattr(resp_b, "data") and resp_b.data) else None
+
+        if booking:
+            # if already awarded, do nothing
+            if booking.get("status") == "completed" or booking.get("points_awarded"):
+                return {"ok": True, "message": "already_verified"}
+            # update booking to completed and mark points_awarded True
+            def _upd_booking():
+                return supabase.table("user_bookings").update({"status": "completed", "points_awarded": True, "booking_date": now_iso()}).eq("id", booking["id"]).execute()
+            await asyncio.to_thread(_upd_booking)
+            booking_id = booking["id"]
+        else:
+            # create completed booking
+            created = await supabase_insert_return("user_bookings", {
+                "user_id": user_id,
+                "business_id": business_id,
+                "booking_date": now_iso(),
+                "status": "completed",
+                "points_awarded": True
+            })
+            booking_id = created["id"] if created else None
+
+        # award verified booking points (idempotent by using a unique reason including promo_code)
+        reason = f"booking_verified:{promo_code}"
+        if not await has_history(user_id, reason):
+            await award_points(user_id, POINTS_BOOKING_VERIFIED, reason, booking_id)
+
+        # update promo row entry_status -> redeemed
+        try:
+            if table_name == "user_giveaways":
+                await supabase_update_by_id_return("user_giveaways", found_row["id"], {"entry_status": "redeemed", "redeemed_at": now_iso()})
+            else:
+                await supabase_update_by_id_return("user_discounts", found_row["id"], {"entry_status": "redeemed", "redeemed_at": now_iso()})
+        except Exception:
+            logger.exception("Failed to update promo entry_status after verification")
+
+        return {"ok": True, "user_id": user_id, "booking_id": booking_id}
+    except json.JSONDecodeError:
+        return PlainTextResponse("Invalid JSON", status_code=400)
+    except Exception as e:
+        logger.exception("verify_booking failed")
+        return PlainTextResponse("Internal Error", status_code=500)
 
 if __name__ == "__main__":
     import uvicorn
