@@ -9,6 +9,8 @@ import logging
 import httpx
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from fastapi import FastAPI, Request
+from starlette.responses import PlainTextResponse, Response
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -23,6 +25,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+VERIFY_KEY = os.getenv("VERIFY_KEY")
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, WEBHOOK_URL]):
     raise RuntimeError("Required env vars missing")
@@ -46,7 +49,6 @@ POINTS_BOOKING_CREATED = 15
 POINTS_BOOKING_VERIFIED = 200
 POINTS_REFERRAL_JOIN = 10
 POINTS_REFERRAL_VERIFIED = 100
-
 DAILY_POINTS_CAP = 2000
 TIER_THRESHOLDS = [
     ("Bronze", 0),
@@ -54,6 +56,13 @@ TIER_THRESHOLDS = [
     ("Gold", 500),
     ("Platinum", 1000),
 ]
+
+# FastAPI app
+app = FastAPI()
+
+# Webhook setup
+_WEBHOOK_SET: bool = False
+_WEBHOOK_LOCK = asyncio.Lock()
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -75,14 +84,10 @@ def get_state(chat_id: int) -> Optional[Dict[str, Any]]:
         USER_STATES.pop(chat_id, None)
         return None
     return st
-    
-# Add this function to your central/utils.py file
+
 async def get_referral_link(referral_code: str) -> str:
-    """
-    Generate a referral link using the bot's username and referral code
-    """
     return f"https://t.me/giveawaycentralhub?start={referral_code}"
-    
+
 async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, retries: int = 3):
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -234,18 +239,12 @@ def create_phone_keyboard():
         "one_time_keyboard": True
     }
 
-# Add these functions to your central/utils.py file
 async def compute_tier_progress(points: int) -> Dict[str, Any]:
-    """
-    Calculate progress to next tier
-    """
     current_tier = compute_tier(points)
     next_tier = None
     next_threshold = None
     points_to_next = 0
     percent_to_next = 0
-    
-    # Find current tier and next threshold
     for i, (name, threshold) in enumerate(TIER_THRESHOLDS):
         if name == current_tier and i < len(TIER_THRESHOLDS) - 1:
             next_tier, next_threshold = TIER_THRESHOLDS[i + 1]
@@ -253,7 +252,6 @@ async def compute_tier_progress(points: int) -> Dict[str, Any]:
             if next_threshold > 0:
                 percent_to_next = min(100, int((points / next_threshold) * 100))
             break
-    
     return {
         "current_tier": current_tier,
         "next_tier": next_tier,
@@ -263,9 +261,6 @@ async def compute_tier_progress(points: int) -> Dict[str, Any]:
     }
 
 async def supabase_get_points_history(user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """
-    Get points history for a user
-    """
     def _q():
         return supabase.table("points_history").select("*").eq("user_id", user_id).order("awarded_at", desc=True).limit(limit).execute()
     try:
@@ -274,7 +269,6 @@ async def supabase_get_points_history(user_id: str, limit: int = 5) -> List[Dict
     except Exception as e:
         logger.error(f"supabase_get_points_history failed: {str(e)}", exc_info=True)
         return []
-
 
 async def supabase_find_draft(chat_id: int) -> Optional[Dict[str, Any]]:
     def _q():
@@ -433,12 +427,7 @@ async def supabase_find_discount(discount_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"supabase_find_discount failed: {str(e)}", exc_info=True)
         return None
 
-
 async def supabase_find_discounts_by_category(category: str):
-    """
-    Return a list of discount rows for a category (active only).
-    Each row is a dict coming from supabase response.
-    """
     def _q():
         return supabase.table("discounts") \
             .select("id, name, discount_percentage, category, business_id") \
@@ -454,9 +443,6 @@ async def supabase_find_discounts_by_category(category: str):
         return []
 
 async def supabase_find_business_categories(business_id: str):
-    """
-    Return a list of category strings for a business_id.
-    """
     def _q():
         return supabase.table("business_categories") \
             .select("category") \
@@ -471,9 +457,6 @@ async def supabase_find_business_categories(business_id: str):
         return []
 
 async def supabase_find_discount_by_id(discount_id: str):
-    """
-    Return single discount dict or None.
-    """
     def _q():
         return supabase.table("discounts").select("*").eq("id", discount_id).limit(1).execute()
     try:
@@ -483,7 +466,7 @@ async def supabase_find_discount_by_id(discount_id: str):
     except Exception:
         logger.exception("supabase_find_discount_by_id failed")
         return None
-        
+
 async def supabase_find_giveaway(giveaway_id: str) -> Optional[Dict[str, Any]]:
     def _q():
         return supabase.table("giveaways").select("*").eq("id", giveaway_id).limit(1).execute()
@@ -607,4 +590,309 @@ async def set_menu_button():
             )
             logger.info("Set menu button and commands")
         except Exception as e:
-            logger.error(f"Failed to set menu/commands: {str(e)}", exc_info=True)  
+            logger.error(f"Failed to set menu/commands: {str(e)}", exc_info=True)
+
+async def initialize_bot_once():
+    global _WEBHOOK_SET
+    if _WEBHOOK_SET:
+        return
+    async with _WEBHOOK_LOCK:
+        if _WEBHOOK_SET:
+            return
+        if not BOT_TOKEN or not WEBHOOK_URL:
+            logger.error("BOT_TOKEN or WEBHOOK_URL missing; cannot set webhook.")
+            return
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                    json={"url": WEBHOOK_URL, "allowed_updates": ["message", "callback_query"]},
+                )
+                resp.raise_for_status()
+                logger.info("Webhook set successfully to %s", WEBHOOK_URL)
+                _WEBHOOK_SET = True
+        except Exception:
+            logger.exception("Failed to set webhook")
+
+@app.post("/hook/central_bot")
+async def webhook_handler(request: Request) -> Response:
+    try:
+        update = await request.json()
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON received in webhook", exc_info=True)
+        return Response(status_code=200)
+
+    asyncio.create_task(initialize_bot_once())
+
+    if not update:
+        return Response(status_code=200)
+
+    callback_query = update.get("callback_query")
+    message = update.get("message")
+
+    try:
+        if callback_query:
+            await handle_callback_query(callback_query)
+        if message:
+            await handle_message_update(message)
+    except Exception:
+        logger.exception("Error handling update")
+    return Response(status_code=200)
+
+async def handle_message_update(message: Dict[str, Any]) -> Dict[str, Any]:
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if not chat_id:
+        logger.error("Message update without chat id: %s", message)
+        return {"ok": True}
+
+    text = (message.get("text") or "").strip()
+    contact = message.get("contact")
+    state = USER_STATES.get(chat_id, {})
+
+    if isinstance(text, str) and text.lower().startswith("/myid"):
+        await send_message(chat_id, f"Your Telegram ID: {chat_id}")
+        return {"ok": True}
+
+    if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID) and isinstance(text, str):
+        if text.startswith("/approve_") or text.startswith("/reject_"):
+            try:
+                return await handle_admin_command(text, chat_id)
+            except Exception:
+                logger.exception("handle_admin_command failed")
+                return {"ok": True}
+
+    if isinstance(text, str) and text.lower() == "/menu":
+        await send_message(chat_id, "Choose an option:", reply_markup=create_menu_options_keyboard())
+        return {"ok": True}
+
+    if contact and state.get("stage") == "awaiting_phone_profile":
+        try:
+            return await handle_phone_contact(contact, state, chat_id)
+        except Exception:
+            logger.exception("handle_phone_contact failed")
+            return {"ok": True}
+
+    if state.get("stage") in ["awaiting_dob", "awaiting_dob_profile"]:
+        try:
+            return await handle_dob_input(text, state, chat_id)
+        except Exception:
+            logger.exception("handle_dob_input failed")
+            return {"ok": True}
+
+    if isinstance(text, str) and text.lower().startswith("/start"):
+        try:
+            return await handle_start(message, state, chat_id)
+        except Exception:
+            logger.exception("handle_start failed")
+            return {"ok": True}
+
+    return {"ok": True}
+
+async def handle_callback_query(callback_query: Dict[str, Any]) -> Dict[str, Any]:
+    user = callback_query.get("from") or {}
+    chat_id = user.get("id")
+    callback_data = callback_query.get("data")
+    message = callback_query.get("message") or {}
+    message_id = message.get("message_id")
+
+    if not chat_id or not callback_data or message_id is None:
+        logger.error(
+            "Invalid callback_query: chat_id=%s callback_data=%s message_id=%s", chat_id, callback_data, message_id
+        )
+        return {"ok": True}
+
+    try:
+        registered = await supabase_find_registered(chat_id)
+    except Exception:
+        logger.exception("Failed to fetch registered user")
+        registered = None
+
+    state = USER_STATES.get(chat_id, {})
+
+    if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
+        if callback_data.startswith(("approve:", "reject:", "giveaway_approve:", "giveaway_reject:")):
+            try:
+                return await handle_admin_callback(callback_query, message_id)
+            except Exception:
+                logger.exception("handle_admin_callback failed")
+                return {"ok": True}
+
+    if callback_data in ["menu:main", "menu:language"]:
+        try:
+            return await handle_menu(callback_data, chat_id, message_id, state)
+        except Exception:
+            logger.exception("handle_menu failed")
+            return {"ok": True}
+
+    if state.get("stage") in ["awaiting_language", "awaiting_language_change"] and callback_data.startswith("lang:"):
+        try:
+            return await handle_language_selection(callback_data, state, chat_id, message_id)
+        except Exception:
+            logger.exception("handle_language_selection failed")
+            return {"ok": True}
+
+    if state.get("stage") == "awaiting_gender" and callback_data.startswith("gender:"):
+        try:
+            return await handle_gender_selection(callback_data, state, chat_id, message_id)
+        except Exception:
+            logger.exception("handle_gender_selection failed")
+            return {"ok": True}
+
+    if state.get("stage") == "awaiting_interests" and (
+        callback_data.startswith("interest:") or callback_data == "interests_done"
+    ):
+        try:
+            return await handle_interests_selection(callback_data, state, chat_id, message_id, registered)
+        except Exception:
+            logger.exception("handle_interests_selection failed")
+            return {"ok": True}
+
+    if registered:
+        try:
+            if callback_data == "menu:points":
+                return await handle_points(callback_query, registered)
+            if callback_data == "menu:profile":
+                return await handle_profile(callback_query, registered, state, chat_id)
+            if callback_data == "menu:discounts":
+                return await handle_discounts(callback_query, registered, chat_id)
+            if callback_data.startswith(("discount_category:", "profile:", "services:", "book:", "get_discount:")):
+                return await handle_discount_callback(callback_data, chat_id, registered)
+            if callback_data == "menu:giveaways":
+                return await handle_giveaways(callback_query, registered, chat_id)
+            if callback_data.startswith(("giveaway_points:", "giveaway_book:")):
+                return await handle_giveaway_callback(callback_data, chat_id, registered)
+        except Exception:
+            logger.exception("Registered-user callback handling failed")
+            return {"ok": True}
+
+    return {"ok": True}
+
+@app.post("/verify_booking")
+async def verify_booking(request: Request):
+    if VERIFY_KEY:
+        provided = request.headers.get("x-verify-key")
+        if provided != VERIFY_KEY:
+            return PlainTextResponse("Forbidden", status_code=403)
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return PlainTextResponse("Invalid JSON", status_code=400)
+
+    promo_code = body.get("promo_code")
+    business_id = body.get("business_id")
+    if not promo_code or not business_id:
+        return PlainTextResponse("promo_code and business_id required", status_code=400)
+
+    try:
+        def _q_giveaway():
+            return supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+        resp = await asyncio.to_thread(_q_giveaway)
+        ug = resp.data[0] if resp.data else None
+    except Exception:
+        logger.exception("verify_booking: supabase lookup user_giveaways failed")
+        ug = None
+
+    found_row = None
+    table_name = None
+    if ug:
+        found_row = ug
+        table_name = "user_giveaways"
+    else:
+        try:
+            def _q_disc():
+                return supabase.table("user_discounts").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+            resp2 = await asyncio.to_thread(_q_disc)
+            ud = resp2.data[0] if resp2.data else None
+        except Exception:
+            logger.exception("verify_booking: supabase lookup user_discounts failed")
+            ud = None
+        if ud:
+            found_row = ud
+            table_name = "user_discounts"
+
+    if not found_row:
+        return PlainTextResponse("Promo not found", status_code=404)
+
+    telegram_id = found_row.get("telegram_id")
+    if not telegram_id:
+        return PlainTextResponse("No telegram_id", status_code=400)
+
+    try:
+        def _q_user():
+            return supabase.table("central_bot_leads").select("*").eq("telegram_id", telegram_id).limit(1).execute()
+        resp_user = await asyncio.to_thread(_q_user)
+        users = resp_user.data if hasattr(resp_user, "data") else resp_user.get("data", []) or []
+    except Exception:
+        logger.exception("verify_booking: supabase lookup central_bot_leads failed")
+        users = []
+
+    if not users:
+        return PlainTextResponse("User not found", status_code=404)
+
+    user = users[0]
+    user_id = user["id"]
+
+    try:
+        def _find_booking():
+            return supabase.table("user_bookings").select("*").eq("user_id", user_id).eq("business_id", business_id).limit(1).execute()
+        resp_b = await asyncio.to_thread(_find_booking)
+        booking = resp_b.data[0] if resp_b.data else None
+    except Exception:
+        logger.exception("verify_booking: find booking failed")
+        booking = None
+
+    booking_id = None
+    if booking:
+        if booking.get("status") == "completed" or booking.get("points_awarded"):
+            return {"ok": True, "message": "already_verified"}
+        try:
+            def _upd_booking():
+                return supabase.table("user_bookings").update({"status": "completed", "points_awarded": True, "booking_date": now_iso()}).eq("id", booking["id"]).execute()
+            await asyncio.to_thread(_upd_booking)
+            booking_id = booking["id"]
+        except Exception:
+            logger.exception("verify_booking: update booking failed")
+    else:
+        try:
+            created = await supabase_insert_return("user_bookings", {
+                "user_id": user_id,
+                "business_id": business_id,
+                "booking_date": now_iso(),
+                "status": "completed",
+                "points_awarded": True
+            })
+            booking_id = created["id"] if created else None
+        except Exception:
+            logger.exception("verify_booking: create booking failed")
+            booking_id = None
+
+    reason = f"booking_verified:{promo_code}"
+    try:
+        if not await has_history(user_id, reason):
+            await award_points(user_id, POINTS_BOOKING_VERIFIED, reason, booking_id)
+    except Exception:
+        logger.exception("verify_booking: award_points failed")
+
+    try:
+        if table_name == "user_giveaways":
+            await supabase_update_by_id_return("user_giveaways", found_row["id"], {"entry_status": "redeemed", "redeemed_at": now_iso()})
+        else:
+            await supabase_update_by_id_return("user_discounts", found_row["id"], {"entry_status": "redeemed", "redeemed_at": now_iso()})
+    except Exception:
+        logger.exception("verify_booking: failed to update promo entry_status")
+
+    return {"ok": True, "user_id": user_id, "booking_id": booking_id}
+
+@app.get("/health")
+async def health() -> PlainTextResponse:
+    return PlainTextResponse("OK", status_code=200)
+
+if __name__ == "__main__":
+    import uvicorn
+    try:
+        asyncio.run(set_menu_button())
+    except Exception:
+        logger.exception("Failed to set menu/button during startup")
+    uvicorn.run("utils:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
