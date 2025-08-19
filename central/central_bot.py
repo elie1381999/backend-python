@@ -5,7 +5,7 @@ import httpx
 from fastapi import FastAPI, Request, Header
 from starlette.responses import PlainTextResponse, Response
 from typing import Optional
-from utils import BOT_TOKEN, WEBHOOK_URL, ADMIN_CHAT_ID, supabase, logger, send_message, award_points, has_history, now_iso, safe_clear_markup, supabase_find_registered, create_menu_options_keyboard, create_main_menu_keyboard, USER_STATES
+from .utils import BOT_TOKEN, WEBHOOK_URL, ADMIN_CHAT_ID, supabase, logger, send_message, award_points, has_history, now_iso, safe_clear_markup, supabase_find_registered, create_menu_options_keyboard, create_main_menu_keyboard, USER_STATES
 from handlers.central_handler import handle_start, handle_menu, handle_language_selection, handle_gender_selection, handle_interests_selection
 from handlers.points_handler import handle_points
 from handlers.profile_handler import handle_profile, handle_phone_contact, handle_dob_input
