@@ -1,4 +1,4 @@
-'''
+
 import os
 import asyncio
 import json
@@ -1118,4 +1118,4 @@ if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    '''
+    
