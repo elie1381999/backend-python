@@ -2,6 +2,12 @@ import logging
 from typing import Optional, Dict, Any
 import asyncio
 from supabase import Client
+from dotenv import load_dotenv
+import os
+import httpx
+
+load_dotenv()
+BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
 
 # Logging setup
 logger = logging.getLogger(__name__)
@@ -24,7 +30,7 @@ async def get_user_points(chat_id: int, supabase: Client) -> Optional[Dict[str, 
         def _q():
             return supabase.table("central_bot_leads").select("points, tier").eq("telegram_id", chat_id).eq("is_draft", False).limit(1).execute()
         resp = await asyncio.to_thread(_q)
-        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        data = resp.data if hasattr(resp, "data") else resp.get("data", [])
         if not data:
             logger.info(f"No registered user found for chat_id {chat_id}")
             return None
@@ -50,7 +56,7 @@ async def generate_referral_link(chat_id: int, supabase: Client, bot_username: s
         def _q():
             return supabase.table("central_bot_leads").select("referral_code").eq("telegram_id", chat_id).eq("is_draft", False).limit(1).execute()
         resp = await asyncio.to_thread(_q)
-        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        data = resp.data if hasattr(resp, "data") else resp.get("data", [])
         if not data:
             logger.info(f"No registered user found for chat_id {chat_id}")
             return None
@@ -84,7 +90,7 @@ async def award_referral_points(referred_user_id: str, supabase: Client) -> bool
         def _get_referrer_points():
             return supabase.table("central_bot_leads").select("points").eq("id", referrer_id).limit(1).execute()
         referrer_resp = await asyncio.to_thread(_get_referrer_points)
-        current_points = referrer_resp.data[0]["points"] if referrer_resp.data else 0
+        current_points = referrer_resp.data[0].get("points", 0) if referrer_resp.data else 0
         new_points = current_points + REFERRAL_POINTS
 
         def _update_referrer():
@@ -136,7 +142,7 @@ async def award_booking_points(user_id: str, booking_id: str, supabase: Client) 
         if not user_data:
             logger.error(f"User {user_id} not found")
             return False
-        current_points = user_data["points"]
+        current_points = user_data.get("points", 0)
         new_points = current_points + BOOKING_POINTS
 
         def _update_user():
@@ -191,7 +197,7 @@ async def award_profile_bonus(chat_id: int, supabase: Client) -> bool:
             logger.info(f"Profile bonus already awarded for chat_id {chat_id}")
             return False
         
-        current_points = user["points"]
+        current_points = user.get("points", 0)
         new_points = current_points + PROFILE_BONUS
         
         def _update():
@@ -218,7 +224,7 @@ async def update_user_tier(user_id: str, supabase: Client) -> None:
         def _get_points():
             return supabase.table("central_bot_leads").select("points").eq("id", user_id).limit(1).execute()
         resp = await asyncio.to_thread(_get_points)
-        points = resp.data[0]["points"] if resp.data else 0
+        points = resp.data[0].get("points", 0) if resp.data else 0
         
         new_tier = 'Bronze'
         for tier, threshold in sorted(TIER_THRESHOLDS.items(), key=lambda x: x[1], reverse=True):
@@ -242,13 +248,14 @@ async def log_points_history(user_id: str, points: int, reason: str, supabase: C
         payload = {
             "user_id": user_id,
             "points": points,
-            "reason": reason
+            "reason": reason,
+            "awarded_at": datetime.now(timezone.utc).isoformat()  # Added to match schema
         }
-        await supabase_insert_return("points_history", payload)
+        await supabase_insert_return("points_history", payload, supabase)
     except Exception as e:
         logger.error(f"Failed to log points history for user_id {user_id}: {str(e)}", exc_info=True)
 
-async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str, Any]]:
+async def supabase_insert_return(table: str, payload: dict, supabase: Client) -> Optional[Dict[str, Any]]:
     """
     Helper for inserting and returning.
     """
@@ -256,7 +263,7 @@ async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str
         return supabase.table(table).insert(payload).execute()
     try:
         resp = await asyncio.to_thread(_ins)
-        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        data = resp.data if hasattr(resp, "data") else resp.get("data", [])
         if data:
             return data[0]
         logger.error(f"Insert failed for table {table}: no data returned")
@@ -283,6 +290,8 @@ async def send_message(chat_id: int, text: str, retries: int = 3) -> Dict[str, A
                 return response.json()
             except httpx.HTTPStatusError as e:
                 logger.error(f"Failed to send message: HTTP {e.response.status_code} - {e.response.text}")
+                if e.response.status_code in [403, 400]:
+                    return {"ok": False, "error": f"HTTP {e.response.status_code} (skipped)"}
                 if e.response.status_code == 429:
                     retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
                     await asyncio.sleep(retry_after)
