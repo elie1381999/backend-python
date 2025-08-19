@@ -1,15 +1,17 @@
 import os
 import asyncio
+import json
+import httpx
 from fastapi import FastAPI, Request, Header
 from starlette.responses import PlainTextResponse, Response
-from utils import BOT_TOKEN, WEBHOOK_URL, ADMIN_CHAT_ID, supabase, logger, send_message, award_points, has_history, now_iso, safe_clear_markup, supabase_find_registered, create_menu_options_keyboard, create_main_menu_keyboard
+from typing import Optional
+from utils import BOT_TOKEN, WEBHOOK_URL, ADMIN_CHAT_ID, supabase, logger, send_message, award_points, has_history, now_iso, safe_clear_markup, supabase_find_registered, create_menu_options_keyboard, create_main_menu_keyboard, USER_STATES
 from handlers.central_handler import handle_start, handle_menu, handle_language_selection, handle_gender_selection, handle_interests_selection
 from handlers.points_handler import handle_points
 from handlers.profile_handler import handle_profile, handle_phone_contact, handle_dob_input
 from handlers.discount_handler import handle_discounts, handle_discount_callback
 from handlers.giveaway_handler import handle_giveaways, handle_giveaway_callback
 from handlers.admin_handler import handle_admin_command, handle_admin_callback
-from typing import Dict, Any
 
 app = FastAPI()
 
@@ -48,13 +50,14 @@ async def webhook_handler(request: Request) -> Response:
         logger.error(f"Webhook error: {str(e)}", exc_info=True)
         return Response(status_code=200)
 
-async def handle_message_update(message: Dict[str, Any]):
+async def handle_message_update(message: dict[str, Any]):
     chat_id = message.get("chat", {}).get("id")
     if not chat_id:
+        logger.error("No chat_id in message")
         return {"ok": True}
     text = (message.get("text") or "").strip()
     contact = message.get("contact")
-    state = get_state(chat_id) or {}
+    state = USER_STATES.get(chat_id, {})
 
     if text.lower() == "/myid":
         await send_message(chat_id, f"Your Telegram ID: {chat_id}")
@@ -78,15 +81,16 @@ async def handle_message_update(message: Dict[str, Any]):
 
     return {"ok": True}
 
-async def handle_callback_query(callback_query: Dict[str, Any]):
+async def handle_callback_query(callback_query: dict[str, Any]):
     chat_id = callback_query.get("from", {}).get("id")
     callback_data = callback_query.get("data")
     message_id = callback_query.get("message", {}).get("message_id")
     if not chat_id or not callback_data or not message_id:
+        logger.error(f"Invalid callback query: chat_id={chat_id}, callback_data={callback_data}, message_id={message_id}")
         return {"ok": True}
 
     registered = await supabase_find_registered(chat_id)
-    state = get_state(chat_id) or {}
+    state = USER_STATES.get(chat_id, {})
 
     if chat_id == int(ADMIN_CHAT_ID) and (callback_data.startswith("approve:") or callback_data.startswith("reject:") or callback_data.startswith("giveaway_approve:") or callback_data.startswith("giveaway_reject:")):
         return await handle_admin_callback(callback_query, message_id)
