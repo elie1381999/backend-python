@@ -1,4 +1,3 @@
-```python
 import re
 import asyncio
 from typing import Dict, Any, Optional, List
@@ -317,4 +316,3 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         return
 
     await safe_clear_markup(chat_id, message_id)
-```
