@@ -545,9 +545,10 @@ async def webhook_handler(request: Request) -> Response:
                     await send_message(chat_id, "Failed to reject business. Please try again.")
                 return Response(status_code=200)
 
-            if callback_query and callback_data := callback_query.get("data"):
+            if callback_query:
+                callback_data = callback_query.get("data")
                 message_id = callback_query.get("message", {}).get("message_id")
-                if callback_data.startswith("approve:"):
+                if callback_data and callback_data.startswith("approve:"):
                     business_id = callback_data[len("approve:"):]
                     try:
                         uuid.UUID(business_id)
@@ -569,7 +570,7 @@ async def webhook_handler(request: Request) -> Response:
                         await send_message(chat_id, "Failed to approve business. Please try again.")
                     return Response(status_code=200)
 
-                if callback_data.startswith("reject:"):
+                if callback_data and callback_data.startswith("reject:"):
                     business_id = callback_data[len("reject:"):]
                     try:
                         uuid.UUID(business_id)
@@ -591,7 +592,7 @@ async def webhook_handler(request: Request) -> Response:
                         await send_message(chat_id, "Failed to reject business. Please try again.")
                     return Response(status_code=200)
 
-                if callback_data.startswith("giveaway_approve:"):
+                if callback_data and callback_data.startswith("giveaway_approve:"):
                     giveaway_id = callback_data[len("giveaway_approve:"):]
                     try:
                         uuid.UUID(giveaway_id)
@@ -615,7 +616,7 @@ async def webhook_handler(request: Request) -> Response:
                         await send_message(chat_id, "Failed to approve giveaway. Please try again.")
                     return Response(status_code=200)
 
-                if callback_data.startswith("giveaway_reject:"):
+                if callback_data and callback_data.startswith("giveaway_reject:"):
                     giveaway_id = callback_data[len("giveaway_reject:"):]
                     try:
                         uuid.UUID(giveaway_id)
@@ -701,8 +702,6 @@ async def verify_booking(request: Request):
     except Exception as e:
         logger.error(f"Failed to verify booking: {str(e)}", exc_info=True)
         return PlainTextResponse("Internal server error", status_code=500)
-
-
 
 
 
