@@ -1,3 +1,4 @@
+'''
 import logging
 from typing import Optional, Dict, Any
 import asyncio
@@ -304,3 +305,4 @@ async def send_message(chat_id: int, text: str, retries: int = 3) -> Dict[str, A
                 continue
         logger.error(f"Failed to send message to chat_id {chat_id} after {retries} attempts")
         return {"ok": False, "error": "Max retries reached"}
+'''
