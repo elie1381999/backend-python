@@ -1,3 +1,4 @@
+# handlers/discount_handler.py
 from typing import Dict, Any
 import asyncio
 from central.utils import (
@@ -13,7 +14,9 @@ from central.utils import (
     CATEGORIES,
     logger,
     uuid,
-    supabase
+    supabase_find_discounts_by_category,
+    supabase_find_business_categories,
+    supabase_find_discount_by_id,
 )
 
 async def handle_discounts(callback_query: Dict[str, Any], registered: Dict[str, Any], chat_id: int):
@@ -33,16 +36,14 @@ async def handle_discounts(callback_query: Dict[str, Any], registered: Dict[str,
     return {"ok": True}
 
 async def handle_discount_callback(callback_data: str, chat_id: int, registered: Dict[str, Any]):
+    # discount category listing
     if callback_data.startswith("discount_category:"):
         category = callback_data[len("discount_category:"):]
         if category not in CATEGORIES:
             await send_message(chat_id, "Invalid category.")
             return {"ok": True}
         try:
-            def _query_discounts():
-                return supabase.table("discounts").select("id, name, discount_percentage, category, business_id").eq("category", category).eq("active", True).execute()
-            resp = await asyncio.to_thread(_query_discounts)
-            discounts = resp.data if hasattr(resp, "data") else resp.get("data", [])
+            discounts = await supabase_find_discounts_by_category(category)
             if not discounts:
                 await send_message(chat_id, f"No discounts in *{category}*.")
                 return {"ok": True}
@@ -51,10 +52,10 @@ async def handle_discount_callback(callback_data: str, chat_id: int, registered:
                 if not business:
                     await send_message(chat_id, f"Business not found for {d['name']}.")
                     continue
-                def _query_categories():
-                    return supabase.table("business_categories").select("category").eq("business_id", d["business_id"]).execute()
-                categories_resp = await asyncio.to_thread(_query_categories)
-                categories = [cat["category"] for cat in (categories_resp.data if hasattr(categories_resp, "data") else categories_resp.get("data", []))] or ["None"]
+
+                categories = await supabase_find_business_categories(d["business_id"])
+                if not categories:
+                    categories = ["None"]
                 location = business.get("location", "Unknown")
                 message = (
                     f"Discount: *{d['name']}*\n"
@@ -79,6 +80,8 @@ async def handle_discount_callback(callback_data: str, chat_id: int, registered:
             logger.error(f"Fetch discounts failed: {str(e)}", exc_info=True)
             await send_message(chat_id, "Failed to load discounts.")
         return {"ok": True}
+
+    # business profile
     elif callback_data.startswith("profile:"):
         business_id = callback_data[len("profile:"):]
         try:
@@ -86,10 +89,7 @@ async def handle_discount_callback(callback_data: str, chat_id: int, registered:
             if not business:
                 await send_message(chat_id, "Business not found.")
                 return {"ok": True}
-            def _query_categories():
-                return supabase.table("business_categories").select("category").eq("business_id", business_id).execute()
-            categories_resp = await asyncio.to_thread(_query_categories)
-            categories = [cat["category"] for cat in (categories_resp.data if hasattr(categories_resp, "data") else categories_resp.get("data", []))] or ["None"]
+            categories = await supabase_find_business_categories(business_id)
             work_days = business.get("work_days", []) or ["Not set"]
             msg = (
                 f"Business Profile:\n"
@@ -104,6 +104,8 @@ async def handle_discount_callback(callback_data: str, chat_id: int, registered:
             logger.error(f"Fetch profile failed: {str(e)}", exc_info=True)
             await send_message(chat_id, "Failed to load profile.")
         return {"ok": True}
+
+    # services info (keeps simple: uses stored 'prices' field if any)
     elif callback_data.startswith("services:"):
         business_id = callback_data[len("services:"):]
         try:
@@ -118,6 +120,8 @@ async def handle_discount_callback(callback_data: str, chat_id: int, registered:
             logger.error(f"Fetch services failed: {str(e)}", exc_info=True)
             await send_message(chat_id, "Failed to load services.")
         return {"ok": True}
+
+    # booking flow
     elif callback_data.startswith("book:"):
         business_id = callback_data[len("book:"):]
         try:
@@ -151,12 +155,14 @@ async def handle_discount_callback(callback_data: str, chat_id: int, registered:
             logger.error(f"Book info failed: {str(e)}", exc_info=True)
             await send_message(chat_id, "Failed to load booking info.")
         return {"ok": True}
+
+    # generate discount (get_discount:)
     elif callback_data.startswith("get_discount:"):
         discount_id = callback_data[len("get_discount:"):]
         try:
             uuid.UUID(discount_id)
-            discount = await supabase_find_discount(discount_id)
-            if not discount or not discount["active"]:
+            discount = await supabase_find_discount_by_id(discount_id)
+            if not discount or not discount.get("active"):
                 await send_message(chat_id, "Discount not found or inactive.")
                 return {"ok": True}
             if not discount.get("business_id"):
@@ -170,3 +176,5 @@ async def handle_discount_callback(callback_data: str, chat_id: int, registered:
             logger.error(f"Generate discount failed: {str(e)}", exc_info=True)
             await send_message(chat_id, "Failed to generate promo.")
         return {"ok": True}
+
+    return {"ok": True}
