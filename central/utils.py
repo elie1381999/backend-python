@@ -12,6 +12,24 @@ from supabase import create_client, Client
 from fastapi import FastAPI, Request
 from starlette.responses import PlainTextResponse, Response
 
+# Import handler functions
+try:
+    from handlers.central_handler import (
+        handle_start,
+        handle_menu,
+        handle_language_selection,
+        handle_gender_selection,
+        handle_interests_selection,
+    )
+    from handlers.points_handler import handle_points
+    from handlers.profile_handler import handle_profile, handle_phone_contact, handle_dob_input
+    from handlers.discount_handler import handle_discounts, handle_discount_callback
+    from handlers.giveaway_handler import handle_giveaways, handle_giveaway_callback
+    from handlers.admin_handler import handle_admin_command, handle_admin_callback
+except ImportError as e:
+    logging.error(f"Failed to import handler modules: {e}")
+    raise
+
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.DEBUG)
