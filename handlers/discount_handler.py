@@ -1,6 +1,6 @@
 from typing import Dict, Any
 import asyncio
-from utils import send_message, create_categories_keyboard, supabase_find_business, generate_discount_code, create_phone_keyboard, award_points, has_history, POINTS_BOOKING_CREATED, supabase_insert_return, CATEGORIES, logger, uuid
+from central.utils import send_message, create_categories_keyboard, supabase_find_business, generate_discount_code, create_phone_keyboard, award_points, has_history, POINTS_BOOKING_CREATED, supabase_insert_return, CATEGORIES, logger, uuid
 
 async def handle_discounts(callback_query: Dict[str, Any], registered: Dict[str, Any], chat_id: int):
     if not registered.get("phone_number") or not registered.get("dob"):
