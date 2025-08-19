@@ -1,3 +1,4 @@
+'''
 import random
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -113,3 +114,4 @@ async def supabase_insert_return(table: str, payload: dict, supabase: Client) ->
     except Exception as e:
         logger.error(f"supabase_insert_return failed for table {table}: {str(e)}", exc_info=True)
         return None
+        '''
