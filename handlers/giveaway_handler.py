@@ -1,7 +1,7 @@
 from typing import Dict, Any
 import asyncio
 from datetime import datetime, timezone
-from utils import send_message, create_main_menu_keyboard, has_redeemed_discount, supabase_update_by_id_return, generate_promo_code, supabase_find_giveaway, notify_users, logger, uuid
+from central.utils import send_message, create_main_menu_keyboard, has_redeemed_discount, supabase_update_by_id_return, generate_promo_code, supabase_find_giveaway, notify_users, logger, uuid
 
 async def handle_giveaways(callback_query: Dict[str, Any], registered: Dict[str, Any], chat_id: int):
     try:
