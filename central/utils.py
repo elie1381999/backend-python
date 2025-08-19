@@ -75,7 +75,14 @@ def get_state(chat_id: int) -> Optional[Dict[str, Any]]:
         USER_STATES.pop(chat_id, None)
         return None
     return st
-
+    
+# Add this function to your central/utils.py file
+async def get_referral_link(referral_code: str) -> str:
+    """
+    Generate a referral link using the bot's username and referral code
+    """
+    return f"https://t.me/giveawaycentralhub?start={referral_code}"
+    
 async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, retries: int = 3):
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -226,6 +233,48 @@ def create_phone_keyboard():
         "resize_keyboard": True,
         "one_time_keyboard": True
     }
+
+# Add these functions to your central/utils.py file
+async def compute_tier_progress(points: int) -> Dict[str, Any]:
+    """
+    Calculate progress to next tier
+    """
+    current_tier = compute_tier(points)
+    next_tier = None
+    next_threshold = None
+    points_to_next = 0
+    percent_to_next = 0
+    
+    # Find current tier and next threshold
+    for i, (name, threshold) in enumerate(TIER_THRESHOLDS):
+        if name == current_tier and i < len(TIER_THRESHOLDS) - 1:
+            next_tier, next_threshold = TIER_THRESHOLDS[i + 1]
+            points_to_next = next_threshold - points
+            if next_threshold > 0:
+                percent_to_next = min(100, int((points / next_threshold) * 100))
+            break
+    
+    return {
+        "current_tier": current_tier,
+        "next_tier": next_tier,
+        "next_threshold": next_threshold,
+        "points_to_next": points_to_next,
+        "percent_to_next": percent_to_next
+    }
+
+async def supabase_get_points_history(user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Get points history for a user
+    """
+    def _q():
+        return supabase.table("points_history").select("*").eq("user_id", user_id).order("awarded_at", desc=True).limit(limit).execute()
+    try:
+        resp = await asyncio.to_thread(_q)
+        return resp.data if hasattr(resp, "data") else resp.get("data", []) or []
+    except Exception as e:
+        logger.error(f"supabase_get_points_history failed: {str(e)}", exc_info=True)
+        return []
+
 
 async def supabase_find_draft(chat_id: int) -> Optional[Dict[str, Any]]:
     def _q():
