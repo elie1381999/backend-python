@@ -1,8 +1,7 @@
 
 from typing import Dict, Any
 from datetime import datetime
-from utils import send_message, create_phone_keyboard, supabase_update_by_id_return, supabase_find_registered, award_points, has_history, POINTS_PROFILE_COMPLETE, create_main_menu_keyboard, get_state, set_state, EMOJIS, logger
-
+from utils import send_message, create_phone_keyboard, supabase_update_by_id_return, supabase_find_registered, award_points, has_history, POINTS_PROFILE_COMPLETE, create_main_menu_keyboard, get_state, set_state, EMOJIS, logger, USER_STATES
 async def handle_profile(callback_query: Dict[str, Any], registered: Dict[str, Any], state: Dict[str, Any], chat_id: int):
     if not registered.get("phone_number"):
         await send_message(chat_id, "Please share your phone number to complete your profile:", reply_markup=create_phone_keyboard())
