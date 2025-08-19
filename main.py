@@ -66,16 +66,10 @@ async def telegram_by_username(bot_username: str, request: Request):
 async def telegram_by_webhook_id(webhook_id: str, request: Request):
     return await handle_webhook_by_webhook_id(request, webhook_id)
 
-@app.get("/")
-def root():
-    return {"message": "Multi-Business Telegram Bot is running!"}
-
-
 # Health check
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
-
 
 
 
