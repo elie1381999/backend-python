@@ -34,9 +34,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-BOT_USERNAME = os.getenv("BOT_USERNAME")  # For referral links
 
-if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, WEBHOOK_URL, BOT_USERNAME]):
+if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, ADMIN_CHAT_ID, WEBHOOK_URL]):
     raise RuntimeError("Missing required environment variables")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
