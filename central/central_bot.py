@@ -1,3 +1,4 @@
+'''
 # central/central_bot.py
 import os
 import asyncio
@@ -453,7 +454,7 @@ if __name__ == "__main__":
         logger.exception("Failed to set menu/button during startup")
 
     uvicorn.run("central.central_bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
-
+'''
 
 
 
