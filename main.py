@@ -64,17 +64,27 @@ async def initialize_webhooks():
                 bot_username = bot["bot_username"]
                 webhook_url = f"{WEBHOOK_BASE_URL}/hook/{bot_id}"
                 
-                try:
-                    response = await client.post(
-                        f"https://api.telegram.org/bot{bot_token}/setWebhook",
-                        json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]}
-                    )
-                    response.raise_for_status()
-                    logger.info(f"Webhook set for bot {bot_username} at {webhook_url}")
-                except httpx.HTTPStatusError as e:
-                    logger.error(f"Failed to set webhook for bot {bot_username}: HTTP {e.response.status_code} - {e.response.text}")
-                except Exception as e:
-                    logger.error(f"Failed to set webhook for bot {bot_username}: {str(e)}", exc_info=True)
+                retries = 3
+                for attempt in range(retries):
+                    try:
+                        response = await client.post(
+                            f"https://api.telegram.org/bot{bot_token}/setWebhook",
+                            json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]}
+                        )
+                        response.raise_for_status()
+                        logger.info(f"Webhook set for bot {bot_username} at {webhook_url}")
+                        break  # Success, move to next bot
+                    except httpx.HTTPStatusError as e:
+                        logger.error(f"Failed to set webhook for bot {bot_username} (attempt {attempt+1}): HTTP {e.response.status_code} - {e.response.text}")
+                        if "name resolution" in e.response.text.lower() or e.response.status_code == 429:
+                            await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                        else:
+                            break  # Non-retryable error
+                    except Exception as e:
+                        logger.error(f"Failed to set webhook for bot {bot_username} (attempt {attempt+1}): {str(e)}", exc_info=True)
+                        await asyncio.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Max retries reached for setting webhook for bot {bot_username}")
     except Exception as e:
         logger.error(f"Failed to initialize webhooks: {str(e)}", exc_info=True)
 
