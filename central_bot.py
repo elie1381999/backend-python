@@ -1,5 +1,251 @@
 import os
 import asyncio
+from fastapi import FastAPI, Request, Header
+from starlette.responses import PlainTextResponse, Response
+from utils import BOT_TOKEN, WEBHOOK_URL, ADMIN_CHAT_ID, supabase, logger, send_message, award_points, has_history, now_iso, safe_clear_markup, supabase_find_registered, create_menu_options_keyboard, create_main_menu_keyboard
+from handlers.central_handler import handle_start, handle_menu, handle_language_selection, handle_gender_selection, handle_interests_selection
+from handlers.points_handler import handle_points
+from handlers.profile_handler import handle_profile, handle_phone_contact, handle_dob_input
+from handlers.discount_handler import handle_discounts, handle_discount_callback
+from handlers.giveaway_handler import handle_giveaways, handle_giveaway_callback
+from handlers.admin_handler import handle_admin_command, handle_admin_callback
+
+app = FastAPI()
+
+VERIFY_KEY = os.getenv("VERIFY_KEY")
+
+async def initialize_bot():
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        try:
+            response = await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                json={"url": WEBHOOK_URL, "allowed_updates": ["message", "callback_query"]}
+            )
+            response.raise_for_status()
+            logger.info(f"Webhook set to {WEBHOOK_URL}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {str(e)}", exc_info=True)
+
+@app.post("/hook/central_bot")
+async def webhook_handler(request: Request) -> Response:
+    try:
+        update = await request.json()
+        if not update:
+            return Response(status_code=200)
+        await initialize_bot()
+        message = update.get("message")
+        if message:
+            await handle_message_update(message)
+        callback_query = update.get("callback_query")
+        if callback_query:
+            await handle_callback_query(callback_query)
+        return Response(status_code=200)
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON in webhook", exc_info=True)
+        return Response(status_code=200)
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}", exc_info=True)
+        return Response(status_code=200)
+
+async def handle_message_update(message: Dict[str, Any]):
+    chat_id = message.get("chat", {}).get("id")
+    if not chat_id:
+        return {"ok": True}
+    text = (message.get("text") or "").strip()
+    contact = message.get("contact")
+    state = get_state(chat_id) or {}
+
+    if text.lower() == "/myid":
+        await send_message(chat_id, f"Your Telegram ID: {chat_id}")
+        return {"ok": True}
+
+    if chat_id == int(ADMIN_CHAT_ID) and (text.startswith("/approve_") or text.startswith("/reject_")):
+        return await handle_admin_command(text, chat_id)
+
+    if text.lower() == "/menu":
+        await send_message(chat_id, "Choose an option:", reply_markup=create_menu_options_keyboard())
+        return {"ok": True}
+
+    if contact and state.get("stage") == "awaiting_phone_profile":
+        return await handle_phone_contact(contact, state, chat_id)
+
+    if state.get("stage") in ["awaiting_dob", "awaiting_dob_profile"]:
+        return await handle_dob_input(text, state, chat_id)
+
+    if text.lower().startswith("/start"):
+        return await handle_start(message, state, chat_id)
+
+    return {"ok": True}
+
+async def handle_callback_query(callback_query: Dict[str, Any]):
+    chat_id = callback_query.get("from", {}).get("id")
+    callback_data = callback_query.get("data")
+    message_id = callback_query.get("message", {}).get("message_id")
+    if not chat_id or not callback_data or not message_id:
+        return {"ok": True}
+
+    registered = await supabase_find_registered(chat_id)
+    state = get_state(chat_id) or {}
+
+    if chat_id == int(ADMIN_CHAT_ID) and (callback_data.startswith("approve:") or callback_data.startswith("reject:") or callback_data.startswith("giveaway_approve:") or callback_data.startswith("giveaway_reject:")):
+        return await handle_admin_callback(callback_query, message_id)
+
+    if callback_data in ["menu:main", "menu:language"]:
+        return await handle_menu(callback_data, chat_id, message_id, state)
+
+    if state.get("stage") in ["awaiting_language", "awaiting_language_change"] and callback_data.startswith("lang:"):
+        return await handle_language_selection(callback_data, state, chat_id, message_id)
+
+    if state.get("stage") == "awaiting_gender" and callback_data.startswith("gender:"):
+        return await handle_gender_selection(callback_data, state, chat_id, message_id)
+
+    if state.get("stage") == "awaiting_interests" and (callback_data.startswith("interest:") or callback_data == "interests_done"):
+        return await handle_interests_selection(callback_data, state, chat_id, message_id, registered)
+
+    if registered:
+        if callback_data == "menu:points":
+            return await handle_points(callback_query, registered)
+        elif callback_data == "menu:profile":
+            return await handle_profile(callback_query, registered, state, chat_id)
+        elif callback_data == "menu:discounts":
+            return await handle_discounts(callback_query, registered, chat_id)
+        elif callback_data.startswith("discount_category:") or callback_data.startswith("profile:") or callback_data.startswith("services:") or callback_data.startswith("book:") or callback_data.startswith("get_discount:"):
+            return await handle_discount_callback(callback_data, chat_id, registered)
+        elif callback_data == "menu:giveaways":
+            return await handle_giveaways(callback_query, registered, chat_id)
+        elif callback_data.startswith("giveaway_points:") or callback_data.startswith("giveaway_book:"):
+            return await handle_giveaway_callback(callback_data, chat_id, registered)
+
+    return {"ok": True}
+
+@app.post("/verify_booking")
+async def verify_booking(request: Request):
+    if VERIFY_KEY:
+        provided = request.headers.get("x-verify-key")
+        if provided != VERIFY_KEY:
+            return PlainTextResponse("Forbidden", status_code=403)
+    try:
+        body = await request.json()
+        promo_code = body.get("promo_code")
+        business_id = body.get("business_id")
+        if not promo_code or not business_id:
+            return PlainTextResponse("promo_code and business_id required", status_code=400)
+        # Lookup in user_giveaways
+        def _q_giveaway():
+            return supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+        resp = await asyncio.to_thread(_q_giveaway)
+        ug = resp.data[0] if resp.data else None
+
+        found_row = None
+        table_name = None
+        if ug:
+            found_row = ug
+            table_name = "user_giveaways"
+        else:
+            # Fallback to user_discounts
+            def _q_disc():
+                return supabase.table("user_discounts").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+            resp2 = await asyncio.to_thread(_q_disc)
+            ud = resp2.data[0] if resp2.data else None
+            if ud:
+                found_row = ud
+                table_name = "user_discounts"
+
+        if not found_row:
+            return PlainTextResponse("Promo not found", status_code=404)
+
+        telegram_id = found_row.get("telegram_id")
+        if not telegram_id:
+            return PlainTextResponse("No telegram_id", status_code=400)
+
+        # Find user
+        def _q_user():
+            return supabase.table("central_bot_leads").select("*").eq("telegram_id", telegram_id).limit(1).execute()
+        resp_user = await asyncio.to_thread(_q_user)
+        users = resp_user.data if hasattr(resp_user, "data") else resp_user.get("data", []) or []
+        if not users:
+            return PlainTextResponse("User not found", status_code=404)
+        user = users[0]
+        user_id = user["id"]
+
+        # Booking logic
+        def _find_booking():
+            return supabase.table("user_bookings").select("*").eq("user_id", user_id).eq("business_id", business_id).limit(1).execute()
+        resp_b = await asyncio.to_thread(_find_booking)
+        booking = resp_b.data[0] if resp_b.data else None
+
+        if booking:
+            if booking.get("status") == "completed" or booking.get("points_awarded"):
+                return {"ok": True, "message": "already_verified"}
+            def _upd_booking():
+                return supabase.table("user_bookings").update({"status": "completed", "points_awarded": True, "booking_date": now_iso()}).eq("id", booking["id"]).execute()
+            await asyncio.to_thread(_upd_booking)
+            booking_id = booking["id"]
+        else:
+            created = await supabase_insert_return("user_bookings", {
+                "user_id": user_id,
+                "business_id": business_id,
+                "booking_date": now_iso(),
+                "status": "completed",
+                "points_awarded": True
+            })
+            booking_id = created["id"] if created else None
+
+        reason = f"booking_verified:{promo_code}"
+        if not await has_history(user_id, reason):
+            await award_points(user_id, POINTS_BOOKING_VERIFIED, reason, booking_id)
+
+        try:
+            if table_name == "user_giveaways":
+                await supabase_update_by_id_return("user_giveaways", found_row["id"], {"entry_status": "redeemed", "redeemed_at": now_iso()})
+            else:
+                await supabase_update_by_id_return("user_discounts", found_row["id"], {"entry_status": "redeemed", "redeemed_at": now_iso()})
+        except Exception:
+            logger.exception("Failed to update entry_status")
+
+        return {"ok": True, "user_id": user_id, "booking_id": booking_id}
+    except json.JSONDecodeError:
+        return PlainTextResponse("Invalid JSON", status_code=400)
+    except Exception as e:
+        logger.exception("verify_booking failed")
+        return PlainTextResponse("Internal Error", status_code=500)
+
+@app.get("/health")
+async def health() -> PlainTextResponse:
+    return PlainTextResponse("OK", status_code=200)
+
+if __name__ == "__main__":
+    import uvicorn
+    asyncio.run(initialize_bot())
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''
+it work with the full central page code 1
+import os
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1418,7 +1664,7 @@ if __name__ == "__main__":
     import uvicorn
     asyncio.run(initialize_bot())
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
+'''
 
 
 
