@@ -42,7 +42,7 @@ async def generate_discount_code(chat_id: int, business_id: str, discount_id: st
     if not inserted:
         logger.error(f"Failed to insert discount promo code for chat_id: {chat_id}, discount_id: {discount_id}")
         raise RuntimeError("Failed to save promo code")
-    logger.info(f"Generated discount promo code {code} for chat_id {chat_id}, discount_id {discount_id}")
+    logger.info(f"Generated discount promo code {code} for chat_id {chat_id}, discount_id: {discount_id}")
     return code, expiry
 
 async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, discount_type: str = "standard", supabase: Client) -> tuple[str, str]:
@@ -50,6 +50,9 @@ async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, 
     Generate a unique giveaway promo code for a user and store it in Supabase.
     Returns (code, expiry).
     """
+    allowed_statuses = ['standard', 'loser', 'awaiting_booking', 'redeemed', 'pending']
+    if discount_type not in allowed_statuses:
+        raise ValueError(f"Invalid entry_status: {discount_type}. Must be one of {allowed_statuses}")
     if not business_id or not giveaway_id:
         logger.error(f"Invalid business_id: {business_id} or giveaway_id: {giveaway_id} for chat_id {chat_id}")
         raise ValueError("Business ID or giveaway ID is missing or invalid")
@@ -73,7 +76,7 @@ async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, 
     if not inserted:
         logger.error(f"Failed to insert giveaway promo code for chat_id: {chat_id}, giveaway_id: {giveaway_id}")
         raise RuntimeError("Failed to save promo code")
-    logger.info(f"Generated giveaway promo code {code} for chat_id {chat_id}, giveaway_id {giveaway_id}")
+    logger.info(f"Generated giveaway promo code {code} for chat_id {chat_id}, giveaway_id: {giveaway_id}")
     return code, expiry
 
 async def has_redeemed_discount(chat_id: int, supabase: Client) -> bool:
@@ -85,7 +88,7 @@ async def has_redeemed_discount(chat_id: int, supabase: Client) -> bool:
         return supabase.table("user_discounts").select("id").eq("telegram_id", chat_id).eq("entry_status", "standard").gte("joined_at", current_month.isoformat()).execute()
     try:
         resp = await asyncio.to_thread(_q)
-        data = resp.data if hasattr(resp, "data") else resp.get("data")
+        data = resp.data if hasattr(resp, "data") else resp.get("data", [])
         has_redeemed = bool(data)
         logger.info(f"Checked redeemed discount for chat_id {chat_id}: {has_redeemed}")
         return has_redeemed
