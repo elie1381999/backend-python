@@ -1,120 +1,196 @@
-import random
-import asyncio
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
+import os
 import logging
-from supabase import Client
+import asyncio
+from typing import Dict, Any
+from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi.responses import JSONResponse
+import httpx
+from dotenv import load_dotenv
+from supabase import create_client, Client
+from webhook_handler import handle_webhook_by_username, handle_webhook_by_webhook_id
 
-# Logging setup
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("httpcore").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-async def generate_discount_code(chat_id: int, business_id: str, discount_id: str, supabase: Client) -> tuple[str, str]:
-    """
-    Generate a unique discount promo code for a user and store it in Supabase.
-    Returns (code, expiry).
-    """
-    if not business_id or not discount_id:
-        logger.error(f"Invalid business_id: {business_id} or discount_id: {discount_id} for chat_id {chat_id}")
-        raise ValueError("Business ID or discount ID is missing or invalid")
-    def _check_existing_code():
-        return supabase.table("user_discounts").select("promo_code").eq("promo_code", code).eq("business_id", business_id).execute()
-    def _check_claimed():
-        return supabase.table("user_discounts").select("id").eq("telegram_id", chat_id).eq("discount_id", discount_id).execute()
-    claimed = await asyncio.to_thread(_check_claimed)
-    if claimed.data:
-        raise ValueError("Already claimed this discount")
-    while True:
-        code = f"{random.randint(0, 9999):04d}"
-        existing = await asyncio.to_thread(_check_existing_code)
-        if not existing.data:
-            break
-    expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-    payload = {
-        "telegram_id": chat_id,
-        "business_id": business_id,
-        "discount_id": discount_id,
-        "promo_code": code,
-        "promo_expiry": expiry,
-        "entry_status": "standard",
-        "joined_at": datetime.now(timezone.utc).isoformat()
-    }
-    inserted = await supabase_insert_return("user_discounts", payload, supabase)
-    if not inserted:
-        logger.error(f"Failed to insert discount promo code for chat_id: {chat_id}, discount_id: {discount_id}")
-        raise RuntimeError("Failed to save promo code")
-    logger.info(f"Generated discount promo code {code} for chat_id {chat_id}, discount_id: {discount_id}")
-    return code, expiry
+# Load environment variables
+load_dotenv()
 
-async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, discount_type: str = "standard", supabase: Client) -> tuple[str, str]:
-    """
-    Generate a unique giveaway promo code for a user and store it in Supabase.
-    Returns (code, expiry).
-    """
-    allowed_statuses = ['standard', 'loser', 'awaiting_booking', 'redeemed', 'pending']
-    if discount_type not in allowed_statuses:
-        raise ValueError(f"Invalid entry_status: {discount_type}. Must be one of {allowed_statuses}")
-    if not business_id or not giveaway_id:
-        logger.error(f"Invalid business_id: {business_id} or giveaway_id: {giveaway_id} for chat_id {chat_id}")
-        raise ValueError("Business ID or giveaway ID is missing or invalid")
-    def _check_existing_code():
-        return supabase.table("user_giveaways").select("promo_code").eq("promo_code", code).eq("business_id", business_id).execute()
-    while True:
-        code = f"{random.randint(0, 9999):04d}"
-        existing = await asyncio.to_thread(_check_existing_code)
-        if not existing.data:
-            break
-    expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-    payload = {
-        "telegram_id": chat_id,
-        "business_id": business_id,
-        "giveaway_id": giveaway_id,
-        "promo_code": code,
-        "promo_expiry": expiry,
-        "entry_status": discount_type
-    }
-    inserted = await supabase_insert_return("user_giveaways", payload, supabase)
-    if not inserted:
-        logger.error(f"Failed to insert giveaway promo code for chat_id: {chat_id}, giveaway_id: {giveaway_id}")
-        raise RuntimeError("Failed to save promo code")
-    logger.info(f"Generated giveaway promo code {code} for chat_id {chat_id}, giveaway_id: {giveaway_id}")
-    return code, expiry
+# Environment variables
+REQUIRED_ENV_VARS = [
+    "SUPABASE_URL",
+    "SUPABASE_KEY",
+    "ADMIN_SECRET",
+    "CENTRAL_BOT_TOKEN",
+    "BUSINESS_BOT_TOKEN"
+]
 
-async def has_redeemed_discount(chat_id: int, supabase: Client) -> bool:
-    """
-    Check if the user has redeemed a discount in the current month.
-    """
-    def _q():
-        current_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        return supabase.table("user_discounts").select("id").eq("telegram_id", chat_id).eq("entry_status", "standard").gte("joined_at", current_month.isoformat()).execute()
+# Optional environment variables with defaults
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "https://default-webhook-url.com")  # Fallback URL
+
+# Validate required environment variables
+for var in REQUIRED_ENV_VARS:
+    if not os.getenv(var):
+        logger.error(f"Missing required environment variable: {var}")
+        raise RuntimeError(f"{var} not set in .env")
+
+# Warn if WEBHOOK_BASE_URL is using fallback
+if WEBHOOK_BASE_URL == "https://default-webhook-url.com":
+    logger.warning("WEBHOOK_BASE_URL not set, using fallback URL. Webhooks may not work correctly.")
+
+ADMIN_SECRET = os.getenv("ADMIN_SECRET")
+
+# Initialize Supabase client
+supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
+async def initialize_webhooks():
+    """Initialize webhooks for all bots in Supabase."""
     try:
-        resp = await asyncio.to_thread(_q)
-        data = resp.data if hasattr(resp, "data") else resp.get("data", [])
-        has_redeemed = bool(data)
-        logger.info(f"Checked redeemed discount for chat_id {chat_id}: {has_redeemed}")
-        return has_redeemed
-    except Exception as e:
-        logger.error(f"has_redeemed_discount failed for chat_id {chat_id}: {str(e)}", exc_info=True)
-        return False
+        def _get_bots():
+            return supabase.table("bots").select("id, bot_username, bot_token").execute()
+        bots = await asyncio.to_thread(_get_bots)
+        bots_data = bots.data if hasattr(bots, "data") else bots.get("data", [])
+        
+        if not bots_data:
+            logger.warning("No bots found in Supabase 'bots' table. Skipping webhook initialization.")
+            return
 
-async def supabase_insert_return(table: str, payload: dict, supabase: Client) -> Optional[Dict[str, Any]]:
-    """
-    Helper for inserting and returning data from Supabase.
-    """
-    def _ins():
-        return supabase.table(table).insert(payload).execute()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+            for bot in bots_data:
+                bot_id = bot["id"]
+                bot_token = bot["bot_token"]
+                bot_username = bot["bot_username"]
+                webhook_url = f"{WEBHOOK_BASE_URL}/hook/{bot_id}"
+                
+                try:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{bot_token}/setWebhook",
+                        json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]}
+                    )
+                    response.raise_for_status()
+                    logger.info(f"Webhook set for bot {bot_username} at {webhook_url}")
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"Failed to set webhook for bot {bot_username}: HTTP {e.response.status_code} - {e.response.text}")
+                except Exception as e:
+                    logger.error(f"Failed to set webhook for bot {bot_username}: {str(e)}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Failed to initialize webhooks: {str(e)}", exc_info=True)
+
+async def startup_event():
+    logger.info("Starting webhook initialization...")
+    await initialize_webhooks()
+    logger.info("Webhook initialization completed.")
+
+async def lifespan(app: FastAPI):
+    await startup_event()
+    yield
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(title="Multi-Business Telegram Bot", version="2.0.1", lifespan=lifespan)
+
+# Central bot webhook route
+@app.post("/hook/central_bot")
+async def central_hook(request: Request):
     try:
-        resp = await asyncio.to_thread(_ins)
-        data = resp.data if hasattr(resp, "data") else resp.get("data")
-        if not data:
-            logger.error(f"Failed to insert into {table}: no data returned")
-            return None
-        logger.info(f"Inserted into {table}: {data[0]}")
-        return data[0]
+        return await handle_webhook_by_username(request, "@CentralBot")
     except Exception as e:
-        logger.error(f"supabase_insert_return failed for table {table}: {str(e)}", exc_info=True)
-        return None
+        logger.error(f"Error in central_hook: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=200, content={"ok": True})
 
+# Business bot webhook route
+@app.post("/hook/business_bot")
+async def business_hook(request: Request):
+    try:
+        return await handle_webhook_by_username(request, "@BusinessBot")
+    except Exception as e:
+        logger.error(f"Error in business_hook: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=200, content={"ok": True})
 
+# Admin notification endpoint for city-based notifications
+@app.post("/admin/notify/city")
+async def admin_notify_city(request: Request, x_admin_secret: str = Header(...)):
+    # Avoid logging full headers to prevent leaking sensitive info
+    if x_admin_secret != ADMIN_SECRET:
+        logger.error("Authentication failed: Invalid or missing admin secret")
+        raise HTTPException(status_code=403, detail="Invalid or missing admin secret")
+    
+    try:
+        payload = await request.json()
+        city = payload.get("city")
+        message = payload.get("message")
+        if not city or not message:
+            logger.error("Missing city or message in admin notify payload")
+            raise HTTPException(status_code=400, detail="City and message are required")
+        
+        # Query users in the specified city (fixed field to 'location')
+        def _get_users():
+            return supabase.table("central_bot_leads").select("telegram_id").eq("is_draft", False).eq("location", city).execute()
+        users = await asyncio.to_thread(_get_users)
+        user_ids = [user["telegram_id"] for user in (users.data if hasattr(users, "data") else users.get("data", []))]
+        
+        if not user_ids:
+            logger.info(f"No users found in city {city}")
+            return {"status": "success", "notified_users": 0, "message": f"No users found in {city}"}
+
+        # Send notifications
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+            for user_id in user_ids:
+                try:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{os.getenv('CENTRAL_BOT_TOKEN')}/sendMessage",
+                        json={"chat_id": user_id, "text": message, "parse_mode": "Markdown"}
+                    )
+                    response.raise_for_status()
+                    logger.info(f"Sent notification to user {user_id} in city {city}")
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"Failed to send notification to user {user_id}: HTTP {e.response.status_code} - {e.response.text}")
+                except Exception as e:
+                    logger.error(f"Failed to send notification to user {user_id}: {str(e)}", exc_info=True)
+        
+        return {"status": "success", "notified_users": len(user_ids)}
+    except ValueError:
+        logger.error("Invalid JSON payload in admin notify")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+    except Exception as e:
+        logger.error(f"Error in admin_notify_city: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Generic webhook routes for other bots
+@app.post("/telegram/{bot_username}")
+async def telegram_by_username(bot_username: str, request: Request):
+    try:
+        return await handle_webhook_by_username(request, bot_username)
+    except Exception as e:
+        logger.error(f"Error handling webhook for bot_username {bot_username}: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=200, content={"ok": True})
+
+@app.post("/hook/{webhook_id}")
+async def telegram_by_webhook_id(webhook_id: str, request: Request):
+    try:
+        return await handle_webhook_by_webhook_id(request, webhook_id)
+    except Exception as e:
+        logger.error(f"Error handling webhook for webhook_id {webhook_id}: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=200, content={"ok": True})
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {"message": "Multi-Business Telegram Bot is running!", "version": "2.0.1"}
+
+# Health check
+@app.get("/health")
+async def health_check():
+    try:
+        # Basic Supabase connectivity check
+        def _ping():
+            return supabase.table("bots").select("id").limit(1).execute()
+        await asyncio.to_thread(_ping)
+        return {"status": "ok", "supabase": "connected"}
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
+        return {"status": "error", "detail": str(e)}
 
 
 
