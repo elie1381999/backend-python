@@ -384,6 +384,57 @@ async def supabase_find_discount(discount_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"supabase_find_discount failed: {str(e)}", exc_info=True)
         return None
 
+
+async def supabase_find_discounts_by_category(category: str):
+    """
+    Return a list of discount rows for a category (active only).
+    Each row is a dict coming from supabase response.
+    """
+    def _q():
+        return supabase.table("discounts") \
+            .select("id, name, discount_percentage, category, business_id") \
+            .eq("category", category) \
+            .eq("active", True) \
+            .execute()
+    try:
+        resp = await asyncio.to_thread(_q)
+        rows = resp.data if hasattr(resp, "data") else resp.get("data", []) or []
+        return rows
+    except Exception:
+        logger.exception("supabase_find_discounts_by_category failed")
+        return []
+
+async def supabase_find_business_categories(business_id: str):
+    """
+    Return a list of category strings for a business_id.
+    """
+    def _q():
+        return supabase.table("business_categories") \
+            .select("category") \
+            .eq("business_id", business_id) \
+            .execute()
+    try:
+        resp = await asyncio.to_thread(_q)
+        rows = resp.data if hasattr(resp, "data") else resp.get("data", []) or []
+        return [r["category"] for r in rows]
+    except Exception:
+        logger.exception("supabase_find_business_categories failed")
+        return []
+
+async def supabase_find_discount_by_id(discount_id: str):
+    """
+    Return single discount dict or None.
+    """
+    def _q():
+        return supabase.table("discounts").select("*").eq("id", discount_id).limit(1).execute()
+    try:
+        resp = await asyncio.to_thread(_q)
+        rows = resp.data if hasattr(resp, "data") else resp.get("data", []) or []
+        return rows[0] if rows else None
+    except Exception:
+        logger.exception("supabase_find_discount_by_id failed")
+        return None
+        
 async def supabase_find_giveaway(giveaway_id: str) -> Optional[Dict[str, Any]]:
     def _q():
         return supabase.table("giveaways").select("*").eq("id", giveaway_id).limit(1).execute()
