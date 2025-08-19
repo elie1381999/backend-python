@@ -1,6 +1,5 @@
 from typing import Dict, Any
-from utils import supabase_insert_return, supabase_update_by_id_return, supabase_find_draft, supabase_find_registered, send_message, create_language_keyboard, create_gender_keyboard, create_interests_keyboard, create_main_menu_keyboard, get_state, set_state, award_points, has_history, STARTER_POINTS, POINTS_REFERRAL_JOIN, logger, safe_clear_markup, edit_message_keyboard, uuid
-
+from utils import supabase_insert_return, supabase_update_by_id_return, supabase_find_draft, supabase_find_registered, send_message, create_language_keyboard, create_gender_keyboard, create_interests_keyboard, create_main_menu_keyboard, get_state, set_state, award_points, has_history, STARTER_POINTS, POINTS_REFERRAL_JOIN, logger, safe_clear_markup, edit_message_keyboard, uuid, USER_STATES
 async def handle_start(message: Dict[str, Any], state: Dict[str, Any], chat_id: int):
     text = message.get("text", "").lower()
     if text != "/start":
