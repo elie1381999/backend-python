@@ -1,5 +1,5 @@
 from typing import Any
-from utils import send_message
+from central.utils import send_message
 
 async def handle_points(callback_query: dict[str, Any], registered: dict[str, Any]):
     points = registered.get("points", 0)
