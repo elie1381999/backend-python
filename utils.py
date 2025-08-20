@@ -1,136 +1,217 @@
+# utils.py
 import os
 import asyncio
 import logging
-import httpx
 from typing import Optional, Dict, Any
+import httpx
 from dotenv import load_dotenv
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logging.getLogger("httpx").setLevel(logging.DEBUG)
-logging.getLogger("httpcore").setLevel(logging.DEBUG)
-logger = logging.getLogger(__name__)
-
-# Load environment variables
 load_dotenv()
-BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
 
-if not BOT_TOKEN:
-    raise RuntimeError("CENTRAL_BOT_TOKEN must be set in .env")
+logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
-async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, retries: int = 3):
+CENTRAL_BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
+
+if not CENTRAL_BOT_TOKEN:
+    logger.warning("CENTRAL_BOT_TOKEN not set; send_message will fail unless a token is passed explicitly")
+
+# --- Telegram helpers ------------------------------------------------------
+
+async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None,
+                       token: Optional[str] = None, parse_mode: str = "Markdown", retries: int = 3):
+    """Send a Telegram message using async httpx. If token omitted, uses CENTRAL_BOT_TOKEN env var."""
+    bot_token = token or CENTRAL_BOT_TOKEN
+    if not bot_token:
+        raise RuntimeError("No bot token configured for send_message")
+
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
         for attempt in range(retries):
             try:
-                logger.debug(f"Sending message to chat_id {chat_id} (attempt {attempt + 1}): {text}")
-                response = await client.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    json=payload
-                )
-                response.raise_for_status()
-                logger.info(f"Sent message to chat_id {chat_id}: {text}")
-                return response.json()
+                logger.debug(f"send_message attempt {attempt+1} -> chat {chat_id}: {text!r}")
+                r = await client.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=payload)
+                r.raise_for_status()
+                return r.json()
             except httpx.HTTPStatusError as e:
-                logger.error(f"Failed to send message: HTTP {e.response.status_code} - {e.response.text}")
+                logger.error(f"send_message HTTP {e.response.status_code}: {e.response.text}")
                 if e.response.status_code == 429:
-                    retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    try:
+                        retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    except Exception:
+                        retry_after = 1
                     await asyncio.sleep(retry_after)
                     continue
                 return {"ok": False, "error": f"HTTP {e.response.status_code}"}
-            except Exception as e:
-                logger.error(f"Failed to send message: {str(e)}", exc_info=True)
+            except Exception as exc:
+                logger.exception("send_message error")
                 if attempt < retries - 1:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                 continue
-        logger.error(f"Failed to send message to chat_id {chat_id} after {retries} attempts")
-        return {"ok": False, "error": "Max retries reached"}
+        return {"ok": False, "error": "max_retries"}
 
-async def clear_inline_keyboard(chat_id: int, message_id: int, retries: int = 3):
+async def edit_message_keyboard(chat_id: int, message_id: int, reply_markup: dict,
+                                token: Optional[str] = None, retries: int = 3):
+    bot_token = token or CENTRAL_BOT_TOKEN
+    if not bot_token:
+        raise RuntimeError("No bot token configured for edit_message_keyboard")
+    payload = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup}
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         for attempt in range(retries):
             try:
-                logger.debug(f"Clearing inline keyboard for chat_id {chat_id}, message_id {message_id}")
-                response = await client.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
+                r = await client.post(f"https://api.telegram.org/bot{bot_token}/editMessageReplyMarkup", json=payload)
+                r.raise_for_status()
+                return r.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(f"edit_message_keyboard HTTP {e.response.status_code}: {e.response.text}")
+                if e.response.status_code == 429:
+                    try:
+                        retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    except Exception:
+                        retry_after = 1
+                    await asyncio.sleep(retry_after)
+                    continue
+                return {"ok": False, "error": f"HTTP {e.response.status_code}"}
+            except Exception:
+                logger.exception("edit_message_keyboard error")
+                if attempt < retries - 1:
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+        return {"ok": False, "error": "max_retries"}
+
+async def clear_inline_keyboard(chat_id: int, message_id: int, token: Optional[str] = None, retries: int = 3):
+    bot_token = token or CENTRAL_BOT_TOKEN
+    if not bot_token:
+        raise RuntimeError("No bot token configured for clear_inline_keyboard")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        for attempt in range(retries):
+            try:
+                r = await client.post(
+                    f"https://api.telegram.org/bot{bot_token}/editMessageReplyMarkup",
                     json={"chat_id": chat_id, "message_id": message_id, "reply_markup": {}}
                 )
-                response.raise_for_status()
-                logger.info(f"Cleared keyboard for chat_id {chat_id}, message_id {message_id}")
-                return
+                r.raise_for_status()
+                return r.json()
             except httpx.HTTPStatusError as e:
-                logger.error(f"Failed to clear keyboard: HTTP {e.response.status_code}")
+                logger.error(f"clear_inline_keyboard HTTP {e.response.status_code}")
                 if e.response.status_code == 429:
-                    retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    try:
+                        retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
+                    except Exception:
+                        retry_after = 1
                     await asyncio.sleep(retry_after)
                     continue
                 break
-            except Exception as e:
-                logger.error(f"Failed to clear keyboard: {str(e)}")
+            except Exception:
+                logger.exception("clear_inline_keyboard")
                 if attempt < retries - 1:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                 continue
-        logger.error(f"Failed to clear keyboard for chat_id {chat_id} after {retries} attempts")
+        return {"ok": False, "error": "max_retries"}
 
-async def safe_clear_markup(chat_id: int, message_id: int):
+async def safe_clear_markup(chat_id: int, message_id: Optional[int], token: Optional[str] = None):
+    if message_id is None:
+        return
     try:
-        await clear_inline_keyboard(chat_id, message_id)
+        await clear_inline_keyboard(chat_id, message_id, token=token)
     except Exception:
-        logger.debug(f"Ignored error while clearing keyboard for chat_id {chat_id}")
+        logger.debug("Ignored error clearing markup", exc_info=True)
 
-async def edit_message_keyboard(chat_id: int, message_id: int, reply_markup: dict, retries: int = 3):
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        payload = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup}
-        for attempt in range(retries):
-            try:
-                logger.debug(f"Editing keyboard for chat_id {chat_id}, message_id {message_id}")
-                response = await client.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
-                    json=payload
-                )
-                response.raise_for_status()
-                logger.info(f"Edited keyboard for chat_id {chat_id}, message_id {message_id}")
-                return response.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"Failed to edit keyboard: HTTP {e.response.status_code} - {e.response.text}")
-                if e.response.status_code == 429:
-                    retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
-                    await asyncio.sleep(retry_after)
-                    continue
-                return {"ok": False, "error": f"HTTP {e.response.status_code}"}
-            except Exception as e:
-                logger.error(f"Failed to edit keyboard: {str(e)}", exc_info=True)
-                if attempt < retries - 1:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                continue
-        logger.error(f"Failed to edit keyboard for chat_id {chat_id} after {retries} attempts")
-        return {"ok": False, "error": "Max retries reached"}
-
-async def set_menu_button():
+async def set_menu_button(token: Optional[str] = None):
+    """Set chat menu button + default commands for a bot. Uses CENTRAL_BOT_TOKEN by default."""
+    bot_token = token or CENTRAL_BOT_TOKEN
+    if not bot_token:
+        logger.warning("No bot token set for set_menu_button")
+        return
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         try:
-            response = await client.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/setChatMenuButton",
-                json={"menu_button": {"type": "commands"}}
-            )
-            response.raise_for_status()
-            response = await client.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands",
-                json={
-                    "commands": [
-                        {"command": "start", "description": "Start the bot"},
-                        {"command": "menu", "description": "Open the menu"},
-                        {"command": "myid", "description": "Get your Telegram ID"},
-                        {"command": "approve", "description": "Approve a business (admin only)"},
-                        {"command": "reject", "description": "Reject a business (admin only)"}
-                    ]
-                }
-            )
-            response.raise_for_status()
-            logger.info("Set menu button and commands")
+            await client.post(f"https://api.telegram.org/bot{bot_token}/setChatMenuButton", json={"menu_button": {"type": "commands"}})
+            await client.post(f"https://api.telegram.org/bot{bot_token}/setMyCommands", json={
+                "commands": [
+                    {"command": "start", "description": "Start the bot"},
+                    {"command": "menu", "description": "Open the menu"},
+                    {"command": "myid", "description": "Get your Telegram ID"},
+                    {"command": "approve", "description": "Approve a business (admin only)"},
+                    {"command": "reject", "description": "Reject a business (admin only)"},
+                ]
+            })
+            logger.info("set_menu_button completed")
         except httpx.HTTPStatusError as e:
-            logger.error(f"Failed to set menu button or commands: HTTP {e.response.status_code} - {e.response.text}")
-        except Exception as e:
-            logger.error(f"Failed to set menu button or commands: {str(e)}", exc_info=True)
+            logger.error("Failed to set menu or commands: %s %s", e.response.status_code, e.response.text)
+        except Exception:
+            logger.exception("set_menu_button error")
+
+# --- Keyboards -------------------------------------------------------------
+
+def create_menu_options_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "Main Menu", "callback_data": "menu:main"}],
+            [{"text": "Change Language", "callback_data": "menu:language"}]
+        ]
+    }
+
+def create_language_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "English", "callback_data": "lang:en"}],
+            [{"text": "Русский", "callback_data": "lang:ru"}]
+        ]
+    }
+
+def create_gender_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Female", "callback_data": "gender:female"},
+                {"text": "Male", "callback_data": "gender:male"}
+            ]
+        ]
+    }
+
+def create_interests_keyboard(selected: list = None, interests: list = None, emojis: list = None):
+    if selected is None:
+        selected = []
+    if interests is None:
+        interests = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining", "Discounts only", "Giveaways only"]
+    if emojis is None:
+        emojis = ["1️⃣", "2️⃣", "3️⃣"]
+    buttons = []
+    for i, interest in enumerate(interests):
+        text = interest
+        for idx, sel in enumerate(selected):
+            if sel == interest:
+                text = f"{emojis[idx]} {interest}"
+                break
+        buttons.append([{"text": text, "callback_data": f"interest:{interest}"}])
+    buttons.append([{"text": "Done", "callback_data": "interests_done"}])
+    return {"inline_keyboard": buttons}
+
+def create_main_menu_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "My Points", "callback_data": "menu:points"}],
+            [{"text": "Profile", "callback_data": "menu:profile"}],
+            [{"text": "Discounts", "callback_data": "menu:discounts"}],
+            [{"text": "Giveaways", "callback_data": "menu:giveaways"}],
+            [{"text": "Refer Friends", "callback_data": "menu:refer"}]
+        ]
+    }
+
+def create_categories_keyboard(categories: list = None):
+    if categories is None:
+        categories = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining"]
+    buttons = []
+    for cat in categories:
+        buttons.append([{"text": cat, "callback_data": f"discount_category:{cat}"}])
+    return {"inline_keyboard": buttons}
+
+def create_phone_keyboard():
+    return {
+        "keyboard": [[{"text": "Share phone", "request_contact": True}]],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
