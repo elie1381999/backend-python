@@ -6,15 +6,9 @@ import logging
 from utils import (
     send_message,
     edit_message_keyboard,
-    safe_clear_markup,
-    create_menu_options_keyboard,
-    create_language_keyboard,
-    create_gender_keyboard,
-    create_interests_keyboard,
-    create_main_menu_keyboard,
-    create_categories_keyboard,
-    create_phone_keyboard
+    safe_clear_markup
 )
+
 from central_bot import (
     now_iso,
     supabase_find_draft,
