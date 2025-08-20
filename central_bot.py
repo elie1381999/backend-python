@@ -2,10 +2,11 @@
 import os
 import asyncio
 import logging
+import uuid
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Header
 from starlette.responses import PlainTextResponse, JSONResponse
-import httpx
 
 from convo_central import (
     handle_message,
@@ -18,6 +19,7 @@ from convo_central import (
     notify_users,
     award_points,
     has_history,
+    POINTS_REFERRAL_VERIFIED,
 )
 from utils import send_message, set_menu_button
 
@@ -71,8 +73,9 @@ async def central_hook(request: Request):
 
     # Admin manual approve via text commands (simple pattern)
     if chat_id and ADMIN_CHAT_ID and int(chat_id) == int(ADMIN_CHAT_ID):
-        if message and message.get("text", "").startswith("/approve_"):
-            business_id = message["text"][len("/approve_"):]
+        text = (message.get("text") or "") if message else ""
+        if text.startswith("/approve_"):
+            business_id = text[len("/approve_"):]
             try:
                 uuid.UUID(business_id)
                 business = await supabase_find_business(business_id)
@@ -80,13 +83,15 @@ async def central_hook(request: Request):
                     await send_message(chat_id, f"Business {business_id} not found.")
                     return PlainTextResponse("ok", status_code=200)
                 await supabase_update_by_id_return("businesses", business_id, {"status": "approved", "updated_at": datetime.utcnow().isoformat()})
-                await send_message(chat_id, f"Business {business['name']} approved.")
+                await send_message(chat_id, f"Business {business.get('name', business_id)} approved.")
                 await send_message(business["telegram_id"], "Your business has been approved! You can now add discounts and giveaways.")
             except Exception:
+                logger.exception("approve command failed")
                 await send_message(chat_id, f"Failed to approve business {business_id}.")
             return PlainTextResponse("ok", status_code=200)
-        if message and message.get("text", "").startswith("/reject_"):
-            business_id = message["text"][len("/reject_"):]
+
+        if text.startswith("/reject_"):
+            business_id = text[len("/reject_"):]
             try:
                 uuid.UUID(business_id)
                 business = await supabase_find_business(business_id)
@@ -94,9 +99,10 @@ async def central_hook(request: Request):
                     await send_message(chat_id, f"Business {business_id} not found.")
                     return PlainTextResponse("ok", status_code=200)
                 await supabase_update_by_id_return("businesses", business_id, {"status": "rejected", "updated_at": datetime.utcnow().isoformat()})
-                await send_message(chat_id, f"Business {business['name']} rejected.")
+                await send_message(chat_id, f"Business {business.get('name', business_id)} rejected.")
                 await send_message(business["telegram_id"], "Your business registration was rejected. Please contact support.")
             except Exception:
+                logger.exception("reject command failed")
                 await send_message(chat_id, f"Failed to reject business {business_id}.")
             return PlainTextResponse("ok", status_code=200)
 
@@ -109,6 +115,12 @@ async def central_hook(request: Request):
     except Exception:
         logger.exception("Error delegating update")
     return PlainTextResponse("ok", status_code=200)
+
+# Backwards-compat alias expected by previous main.py
+# Some deployment scaffolds import `webhook_handler` from central_bot.
+# Provide that name so `from central_bot import webhook_handler` works.
+async def webhook_handler(request: Request):
+    return await central_hook(request)
 
 @app.post("/admin/notify/city")
 async def admin_notify_city(request: Request, x_admin_secret: str = Header(...)):
