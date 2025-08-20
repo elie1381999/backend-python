@@ -1,3 +1,4 @@
+# convo.py
 import os
 import asyncio
 import logging
@@ -18,7 +19,7 @@ from utils import (
     create_language_keyboard,
     create_gender_keyboard,
     create_interests_keyboard,
-    create_categories_keyboard,  # Added to fix NameError
+    create_categories_keyboard,
     create_main_menu_keyboard,
     create_phone_keyboard,
 )
@@ -600,7 +601,6 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
     if ADMIN_CHAT_ID is None:
         logger.warning("ADMIN_CHAT_ID is not set; admin functionality disabled")
     if chat_id and ADMIN_CHAT_ID is not None and int(chat_id) == int(ADMIN_CHAT_ID):
-
         if data.startswith("approve:"):
             business_id = data[len("approve:"):]
             try:
@@ -850,22 +850,22 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             )
             return
         
-          elif data == "menu:discounts":
-        if not registered.get("phone_number") or not registered.get("dob"):
-            await send_message(chat_id, "Complete your profile to access discounts:", reply_markup=create_phone_keyboard(), token=token)
-            state["stage"] = "awaiting_phone_profile"
-            state["data"] = registered
-            state["entry_id"] = registered["id"]
-            set_state(chat_id, state)
+        elif data == "menu:discounts":
+            if not registered.get("phone_number") or not registered.get("dob"):
+                await send_message(chat_id, "Complete your profile to access discounts:", reply_markup=create_phone_keyboard(), token=token)
+                state["stage"] = "awaiting_phone_profile"
+                state["data"] = registered
+                state["entry_id"] = registered["id"]
+                set_state(chat_id, state)
+                return
+            
+            interests = registered.get("interests", []) or []
+            if not interests:
+                await send_message(chat_id, "No interests set. Please update your profile.", token=token)
+                return
+            
+            await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
             return
-        
-        interests = registered.get("interests", []) or []
-        if not interests:
-            await send_message(chat_id, "No interests set. Please update your profile.", token=token)
-            return
-        
-        await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
-        return
         
         elif data == "menu:giveaways":
             try:
@@ -1182,9 +1182,6 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             return
 
     await safe_clear_markup(chat_id, message_id, token=token)
-
-
-
 
 
 
