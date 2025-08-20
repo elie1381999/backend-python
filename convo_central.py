@@ -1,3 +1,4 @@
+# convo_central.py
 import os
 import asyncio
 import logging
@@ -5,7 +6,7 @@ import re
 import random
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -46,16 +47,17 @@ POINTS_CLAIM_PROMO = 10
 POINTS_BOOKING_CREATED = 15
 POINTS_REFERRAL_JOIN = 10
 POINTS_REFERRAL_VERIFIED = 100
-STATE_TTL_SECONDS = 30 * 60
 
-USER_STATES: Dict[int, Dict[str, Any]] = {}
+USER_STATES: Dict[int, Dict[str, Any]] = {}  # in-memory ephemeral per-chat state
 
-# --- Utilities -------------------------------------------------------------
+# --- Helpers ---------------------------------------------------------------
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-# --- Supabase helpers (all executed in threads because supabase client is sync) ----
-
+# -------------------------
+# Supabase helpers (sync client executed in threads)
+# -------------------------
 async def supabase_find_registered(chat_id: int) -> Optional[Dict[str, Any]]:
     def _q():
         return supabase.table("central_bot_leads").select("*").eq("telegram_id", chat_id).limit(1).execute()
@@ -67,34 +69,6 @@ async def supabase_find_registered(chat_id: int) -> Optional[Dict[str, Any]]:
         return data[0]
     except Exception:
         logger.exception("supabase_find_registered failed")
-        return None
-
-async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str, Any]]:
-    def _ins():
-        return supabase.table(table).insert(payload).execute()
-    try:
-        resp = await asyncio.to_thread(_ins)
-        data = getattr(resp, "data", resp.get("data") if isinstance(resp, dict) else None)
-        if not data:
-            logger.error("supabase_insert_return: no data")
-            return None
-        return data[0]
-    except Exception:
-        logger.exception("supabase_insert_return failed")
-        return None
-
-async def supabase_update_by_id_return(table: str, entry_id: str, payload: dict) -> Optional[Dict[str, Any]]:
-    def _upd():
-        return supabase.table(table).update(payload).eq("id", entry_id).execute()
-    try:
-        resp = await asyncio.to_thread(_upd)
-        data = getattr(resp, "data", resp.get("data") if isinstance(resp, dict) else None)
-        if not data:
-            logger.error(f"supabase_update_by_id_return: no data for {table} id {entry_id}")
-            return None
-        return data[0]
-    except Exception:
-        logger.exception("supabase_update_by_id_return failed")
         return None
 
 async def supabase_find_business(business_id: str) -> Optional[Dict[str, Any]]:
@@ -149,11 +123,60 @@ async def supabase_find_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
         logger.exception("supabase_find_user_by_id failed")
         return None
 
-async def supabase_find_user_by_telegram_id(telegram_id: int) -> Optional[Dict[str, Any]]:
-    return await supabase_find_registered(telegram_id)
+async def supabase_insert_return(table: str, payload: dict) -> Optional[Dict[str, Any]]:
+    def _ins():
+        return supabase.table(table).insert(payload).execute()
+    try:
+        resp = await asyncio.to_thread(_ins)
+        data = getattr(resp, "data", resp.get("data") if isinstance(resp, dict) else None)
+        if not data:
+            logger.error("supabase_insert_return: no data")
+            return None
+        return data[0]
+    except Exception:
+        logger.exception("supabase_insert_return failed")
+        return None
 
-# --- Points / promos ------------------------------------------------------
+async def supabase_update_by_id_return(table: str, entry_id: str, payload: dict) -> Optional[Dict[str, Any]]:
+    def _upd():
+        return supabase.table(table).update(payload).eq("id", entry_id).execute()
+    try:
+        resp = await asyncio.to_thread(_upd)
+        data = getattr(resp, "data", resp.get("data") if isinstance(resp, dict) else None)
+        if not data:
+            logger.error(f"supabase_update_by_id_return: no data for {table} id {entry_id}")
+            return None
+        return data[0]
+    except Exception:
+        logger.exception("supabase_update_by_id_return failed")
+        return None
 
+# helper: find promo row in user_giveaways or user_discounts
+async def find_promo_row(promo_code: str, business_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    def _q_ug():
+        return supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+    def _q_ud():
+        return supabase.table("user_discounts").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+    try:
+        resp = await asyncio.to_thread(_q_ug)
+        row = getattr(resp, "data", resp.get("data", []))
+        if row:
+            return row[0], "user_giveaways"
+        resp2 = await asyncio.to_thread(_q_ud)
+        row2 = getattr(resp2, "data", resp2.get("data", []))
+        if row2:
+            return row2[0], "user_discounts"
+        return None, None
+    except Exception:
+        logger.exception("find_promo_row failed")
+        return None, None
+
+async def mark_promo_as_winner(table_name: str, row_id: str):
+    def _upd():
+        return supabase.table(table_name).update({"entry_status": "winner", "updated_at": now_iso()}).eq("id", row_id).execute()
+    await asyncio.to_thread(_upd)
+
+# --- Points & idempotency -------------------------------------------------
 async def has_history(user_id: str, reason: str) -> bool:
     def _q():
         return supabase.table("points_history").select("id").eq("user_id", user_id).eq("reason", reason).limit(1).execute()
@@ -180,6 +203,7 @@ async def award_points(user_id: str, delta: int, reason: str, booking_id: Option
         hist = {"user_id": user_id, "points": delta, "reason": reason, "awarded_at": now_iso()}
         await supabase_insert_return("points_history", hist)
         logger.info(f"Awarded {delta} pts to user {user_id} ({old_points} -> {new_points})")
+        # referral: if booking verified, forward reward to referrer (best-effort)
         if reason.startswith("booking_verified:"):
             referred_by = user.get("referred_by")
             if referred_by:
@@ -191,17 +215,21 @@ async def award_points(user_id: str, delta: int, reason: str, booking_id: Option
         logger.exception("award_points failed")
         return {"ok": False, "error": "award_failed"}
 
+# --- Promo code generation (unlimited claims allowed) ---------------------
 async def generate_discount_code(chat_id: int, business_id: str, discount_id: str) -> (str, str):
+    """Generate unique 4-digit code, insert to user_discounts. Allows unlimited claims."""
     if not business_id or not discount_id:
         raise ValueError("Business ID or discount ID missing")
-
-    while True:
+    # create unique promo code (4 digits)
+    for _ in range(50):
         code = f"{random.randint(0, 9999):04d}"
-        def _check_existing_code():
-            return supabase.table("user_discounts").select("promo_code").eq("promo_code", code).eq("business_id", business_id).execute()
-        existing = await asyncio.to_thread(_check_existing_code)
-        if not existing.data:
+        def _check_existing():
+            return supabase.table("user_discounts").select("id").eq("promo_code", code).eq("business_id", business_id).execute()
+        existing = await asyncio.to_thread(_check_existing)
+        if not getattr(existing, "data", None):
             break
+    else:
+        raise RuntimeError("Failed to generate unique promo code")
 
     expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
     payload = {
@@ -219,18 +247,19 @@ async def generate_discount_code(chat_id: int, business_id: str, discount_id: st
     logger.info("Generated discount code %s for chat %s", code, chat_id)
     return code, expiry
 
-async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, entry_status: str) -> (str, str):
+async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, entry_status: str = "awaiting_booking") -> (str, str):
+    """Generate promo code for giveaways."""
     if not business_id or not giveaway_id:
         raise ValueError("Business ID or giveaway ID missing")
-
-    while True:
+    for _ in range(50):
         code = f"{random.randint(0, 9999):04d}"
-        def _check_existing_code():
-            return supabase.table("user_giveaways").select("promo_code").eq("promo_code", code).eq("business_id", business_id).execute()
-        existing = await asyncio.to_thread(_check_existing_code)
-        if not existing.data:
+        def _check_existing():
+            return supabase.table("user_giveaways").select("id").eq("promo_code", code).eq("business_id", business_id).execute()
+        existing = await asyncio.to_thread(_check_existing)
+        if not getattr(existing, "data", None):
             break
-
+    else:
+        raise RuntimeError("Failed to generate unique promo code")
     expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
     payload = {
         "telegram_id": chat_id,
@@ -248,7 +277,6 @@ async def generate_promo_code(chat_id: int, business_id: str, giveaway_id: str, 
     return code, expiry
 
 # --- Notifications --------------------------------------------------------
-
 async def notify_users(giveaway_id: str):
     try:
         giveaway = await supabase_find_giveaway(giveaway_id)
@@ -265,30 +293,24 @@ async def notify_users(giveaway_id: str):
     except Exception:
         logger.exception("notify_users failed")
 
-# --- Bot init (optional) ---------------------------------------------------
-
-async def initialize_bot(webhook_url: str, token: Optional[str] = None):
-    # set menu & webhook for central bot
-    await safe_clear_markup  # reference to avoid lint warning for import
-    await set_menu_button if False else None  # noop placeholder if not calling here
-    # We do not call set webhook here because central_bot may handle it (optional)
-
 # --- Conversation handlers -----------------------------------------------
 
 async def handle_message(chat_id: int, message: Dict[str, Any]):
+    """Handle incoming message object from Telegram (text/contact)."""
     text = (message.get("text") or "").strip()
     lc_text = text.lower()
     user = await supabase_find_registered(chat_id)
     state = USER_STATES.get(chat_id, {})
-    state_updated = False
 
-    if lc_text == "/start":
+    # /start - if registered show menu, otherwise start registration asking gender first
+    if lc_text.startswith("/start"):
         if user:
             await send_message(chat_id, "Welcome back! Here's the menu:", create_main_menu_keyboard())
             return
         else:
-            await send_message(chat_id, "Welcome! What's your gender?", create_gender_keyboard())
+            # start fresh registration: ask gender first
             USER_STATES[chat_id] = {"state": "awaiting_gender", "last_updated": now_iso()}
+            await send_message(chat_id, "Welcome! What's your gender? (optional, helps target offers)", create_gender_keyboard())
             return
 
     if lc_text == "/menu":
@@ -302,100 +324,69 @@ async def handle_message(chat_id: int, message: Dict[str, Any]):
         await send_message(chat_id, f"Your Telegram ID is: {chat_id}")
         return
 
-    # states
-    if state.get("state") == "awaiting_dob":
+    # handle incoming contact for phone (when waiting for phone)
+    if state.get("state") == "awaiting_phone" and message.get("contact"):
+        phone = message["contact"].get("phone_number")
+        if not phone:
+            await send_message(chat_id, "Failed to get phone number. Please try again.", create_phone_keyboard())
+            return
+        # ensure user exists (should exist after interests_done)
+        reg = await supabase_find_registered(chat_id)
+        if not reg:
+            await send_message(chat_id, "Registration record not found. Please /start to register.")
+            USER_STATES.pop(chat_id, None)
+            return
+        updated = await supabase_update_by_id_return("central_bot_leads", reg["id"], {"phone": phone, "updated_at": now_iso()})
+        if not updated:
+            await send_message(chat_id, "Failed to save phone number. Please try again.", create_phone_keyboard())
+            return
+        # award profile complete if dob already present and history not awarded
+        if updated.get("dob") and not await has_history(updated["id"], "profile_completed"):
+            await award_points(updated["id"], POINTS_PROFILE_COMPLETE, "profile_completed")
+        # continue post-action if any
+        if state.get("action_after"):
+            action = state.pop("action_after")
+            USER_STATES.pop(chat_id, None)
+            await _continue_after_verification(chat_id, action, updated)
+        else:
+            USER_STATES.pop(chat_id, None)
+            await send_message(chat_id, "Phone number saved. Thank you!", create_main_menu_keyboard())
+        return
+
+    # handle DOB entered when waiting (format DD.MM.YYYY)
+    if state.get("state") == "awaiting_dob" and text:
         dob_match = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", text)
         if not dob_match:
             await send_message(chat_id, "Please enter a valid date of birth (DD.MM.YYYY).")
             return
         day, month, year = map(int, dob_match.groups())
         try:
-            dob = datetime(year, month, day, tzinfo=timezone.utc).isoformat()
-            updated = await supabase_update_by_id_return("central_bot_leads", user["id"], {"dob": dob, "updated_at": now_iso()})
-            if not updated:
-                await send_message(chat_id, "Failed to save date of birth. Please try again.")
-                return
-            user = updated
-            if user.get("phone") and not await has_history(user["id"], "profile_completed"):
-                await award_points(user["id"], POINTS_PROFILE_COMPLETE, "profile_completed")
-            if user.get("phone"):
-                if "action_after" in state:
-                    action = state.pop("action_after")
-                    if action.startswith("claim_discount:"):
-                        discount_id = action[14:]
-                        discount = await supabase_find_discount(discount_id)
-                        if discount:
-                            try:
-                                code, expiry = await generate_discount_code(chat_id, discount["business_id"], discount_id)
-                                await award_points(user["id"], POINTS_CLAIM_PROMO, f"discount_claimed:{discount_id}")
-                                business = await supabase_find_business(discount["business_id"])
-                                await send_message(chat_id, f"Claimed {discount['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
-                            except Exception as e:
-                                await send_message(chat_id, str(e))
-                    elif action.startswith("claim_giveaway:"):
-                        giveaway_id = action[14:]
-                        giveaway = await supabase_find_giveaway(giveaway_id)
-                        if giveaway:
-                            try:
-                                code, expiry = await generate_promo_code(chat_id, giveaway["business_id"], giveaway_id, "awaiting_booking")
-                                await award_points(user["id"], POINTS_BOOKING_CREATED, f"giveaway_joined:{giveaway_id}")
-                                business = await supabase_find_business(giveaway["business_id"])
-                                await send_message(chat_id, f"Entered {giveaway['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
-                            except Exception as e:
-                                await send_message(chat_id, str(e))
-                    USER_STATES.pop(chat_id, None)
-                else:
-                    await send_message(chat_id, "Date of birth set.", create_main_menu_keyboard())
-            else:
-                state["state"] = "awaiting_phone"
-                state["last_updated"] = now_iso()
-                USER_STATES[chat_id] = state
-                await send_message(chat_id, "Please share your phone number:", create_phone_keyboard())
-        except ValueError:
+            dob_iso = datetime(year, month, day, tzinfo=timezone.utc).isoformat()
+        except Exception:
             await send_message(chat_id, "Invalid date. Please enter a valid date of birth (DD.MM.YYYY).")
-        return
-
-    if state.get("state") == "awaiting_phone" and message.get("contact"):
-        phone = message["contact"].get("phone_number")
-        if not phone:
-            await send_message(chat_id, "Failed to get phone number. Please try again.", create_phone_keyboard())
             return
-        updated = await supabase_update_by_id_return("central_bot_leads", user["id"], {"phone": phone, "updated_at": now_iso()})
+        reg = await supabase_find_registered(chat_id)
+        if not reg:
+            await send_message(chat_id, "Registration not found. Please /start to register.")
+            USER_STATES.pop(chat_id, None)
+            return
+        updated = await supabase_update_by_id_return("central_bot_leads", reg["id"], {"dob": dob_iso, "updated_at": now_iso()})
         if not updated:
-            await send_message(chat_id, "Failed to save phone number. Please try again.", create_phone_keyboard())
+            await send_message(chat_id, "Failed to save date of birth. Please try again.")
             return
-        user = updated
-        if user.get("dob") and not await has_history(user["id"], "profile_completed"):
-            await award_points(user["id"], POINTS_PROFILE_COMPLETE, "profile_completed")
-        if "action_after" in state:
+        # award profile complete if phone exists
+        if updated.get("phone") and not await has_history(updated["id"], "profile_completed"):
+            await award_points(updated["id"], POINTS_PROFILE_COMPLETE, "profile_completed")
+        if state.get("action_after"):
             action = state.pop("action_after")
-            if action.startswith("claim_discount:"):
-                discount_id = action[14:]
-                discount = await supabase_find_discount(discount_id)
-                if discount:
-                    try:
-                        code, expiry = await generate_discount_code(chat_id, discount["business_id"], discount_id)
-                        await award_points(user["id"], POINTS_CLAIM_PROMO, f"discount_claimed:{discount_id}")
-                        business = await supabase_find_business(discount["business_id"])
-                        await send_message(chat_id, f"Claimed {discount['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
-                    except Exception as e:
-                        await send_message(chat_id, str(e))
-            elif action.startswith("claim_giveaway:"):
-                giveaway_id = action[14:]
-                giveaway = await supabase_find_giveaway(giveaway_id)
-                if giveaway:
-                    try:
-                        code, expiry = await generate_promo_code(chat_id, giveaway["business_id"], giveaway_id, "awaiting_booking")
-                        await award_points(user["id"], POINTS_BOOKING_CREATED, f"giveaway_joined:{giveaway_id}")
-                        business = await supabase_find_business(giveaway["business_id"])
-                        await send_message(chat_id, f"Entered {giveaway['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
-                    except Exception as e:
-                        await send_message(chat_id, str(e))
+            USER_STATES.pop(chat_id, None)
+            await _continue_after_verification(chat_id, action, updated)
         else:
-            await send_message(chat_id, "Phone number set.", create_main_menu_keyboard())
-        USER_STATES.pop(chat_id, None)
+            USER_STATES.pop(chat_id, None)
+            await send_message(chat_id, "Date of birth saved. Thank you!", create_main_menu_keyboard())
         return
 
+    # if waiting referral id
     if state.get("state") == "awaiting_referral_id" and user:
         referred_by = None
         if text.isdigit():
@@ -412,12 +403,47 @@ async def handle_message(chat_id: int, message: Dict[str, Any]):
         USER_STATES.pop(chat_id, None)
         return
 
-    # default
+    # default fallback
     if user:
         await send_message(chat_id, "Please use /menu to interact or provide a valid command.")
     else:
         await send_message(chat_id, "Please start registration with /start.")
 
+# helper to continue after phone/dob verification
+async def _continue_after_verification(chat_id: int, action: str, reg_row: Dict[str, Any]):
+    """
+    action format examples:
+      - claim_discount:<discount_id>
+      - claim_giveaway:<giveaway_id>
+    """
+    try:
+        if action.startswith("claim_discount:"):
+            discount_id = action.split(":", 1)[1]
+            discount = await supabase_find_discount(discount_id)
+            if not discount:
+                await send_message(chat_id, "Discount not found.", create_main_menu_keyboard())
+                return
+            code, expiry = await generate_discount_code(chat_id, discount["business_id"], discount_id)
+            await award_points(reg_row["id"], POINTS_CLAIM_PROMO, f"discount_claimed:{discount_id}")
+            business = await supabase_find_business(discount["business_id"])
+            await send_message(chat_id, f"Claimed {discount['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
+            return
+        if action.startswith("claim_giveaway:"):
+            giveaway_id = action.split(":", 1)[1]
+            giveaway = await supabase_find_giveaway(giveaway_id)
+            if not giveaway:
+                await send_message(chat_id, "Giveaway not found.", create_main_menu_keyboard())
+                return
+            code, expiry = await generate_promo_code(chat_id, giveaway["business_id"], giveaway_id, "awaiting_booking")
+            await award_points(reg_row["id"], POINTS_BOOKING_CREATED, f"giveaway_joined:{giveaway_id}")
+            business = await supabase_find_business(giveaway["business_id"])
+            await send_message(chat_id, f"Entered {giveaway['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
+            return
+    except Exception:
+        logger.exception("Failed resuming action_after verification")
+        await send_message(chat_id, "Failed to complete your action. Please try again.", create_main_menu_keyboard())
+
+# callback handler
 async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
     data = callback_query.get("data")
     message_id = callback_query.get("message", {}).get("message_id")
@@ -428,6 +454,7 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         await safe_clear_markup(chat_id, message_id)
         return
 
+    # Menu navigation
     if data == "menu:main":
         if user:
             await edit_message_keyboard(chat_id, message_id, create_main_menu_keyboard())
@@ -440,53 +467,61 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         return
 
     if data.startswith("lang:"):
-        lang = data[len("lang:"):]
+        lang = data.split(":", 1)[1]
         if user:
             await supabase_update_by_id_return("central_bot_leads", user["id"], {"language": lang})
             await send_message(chat_id, f"Language set to {lang}.", create_main_menu_keyboard())
         else:
-            await send_message(chat_id, "Please complete registration first with /start.")
+            # create draft with language if possible
+            created = await supabase_insert_return("central_bot_leads", {"telegram_id": chat_id, "language": lang, "is_draft": True, "created_at": now_iso()})
+            await send_message(chat_id, "Language saved. Continue with /start.")
         await safe_clear_markup(chat_id, message_id)
         return
 
+    # gender selection (first step)
     if data.startswith("gender:") and state.get("state") == "awaiting_gender":
-        gender = data[len("gender:"):]
+        gender = data.split(":", 1)[1]
         state["gender"] = gender
         state["state"] = "awaiting_interests"
         state["interests"] = []
         state["last_updated"] = now_iso()
         USER_STATES[chat_id] = state
-        await edit_message_text(chat_id, message_id, "Select up to 5 interests:", create_interests_keyboard(state["interests"]))
+        await edit_message_text(chat_id, message_id, "Select up to 5 interests:", create_interests_keyboard(state["interests"], INTERESTS))
         return
 
+    # interest toggles (up to 5)
     if data.startswith("interest:") and state.get("state") == "awaiting_interests":
-        interest = data[len("interest:"):]
-        interests = state.get("interests", [])
-        if interest in interests:
-            interests.remove(interest)
-        elif len(interests) < 5:
-            interests.append(interest)
-        state["interests"] = interests
+        interest = data.split(":", 1)[1]
+        selected = state.get("interests", [])
+        if interest in selected:
+            selected.remove(interest)
+        elif len(selected) < 5:
+            selected.append(interest)
+        state["interests"] = selected
         state["last_updated"] = now_iso()
         USER_STATES[chat_id] = state
-        await edit_message_keyboard(chat_id, message_id, create_interests_keyboard(state["interests"]))
+        await edit_message_keyboard(chat_id, message_id, create_interests_keyboard(selected, INTERESTS))
         return
 
+    # interests done -> create registered user
     if data == "interests_done" and state.get("state") == "awaiting_interests":
         if not state.get("interests"):
             await send_message(chat_id, "Please select at least one interest.")
             return
         payload = {
             "telegram_id": chat_id,
-            "gender": state["gender"],
-            "interests": state["interests"],
+            "gender": state.get("gender"),
+            "interests": state.get("interests"),
             "is_draft": False,
             "created_at": now_iso(),
             "points": STARTER_POINTS,
-            "language": "en"
+            "language": state.get("language", "en")
         }
         inserted = await supabase_insert_return("central_bot_leads", payload)
         if inserted:
+            # award starter points (idempotent via has_history)
+            if not await has_history(inserted["id"], "signup"):
+                await award_points(inserted["id"], STARTER_POINTS, "signup")
             await send_message(chat_id, "Registration complete! Here's the menu:", create_main_menu_keyboard())
         else:
             await send_message(chat_id, "Failed to complete registration. Please try again.")
@@ -494,24 +529,37 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         await safe_clear_markup(chat_id, message_id)
         return
 
+    # menu items
     if data == "menu:points" and user:
         points = user.get("points", 0)
-        await send_message(chat_id, f"You have {points} points.", create_main_menu_keyboard())
+        await send_message(chat_id, f"You have *{points}* points.", create_main_menu_keyboard())
         await safe_clear_markup(chat_id, message_id)
         return
 
     if data == "menu:profile" and user:
         points = user.get("points", 0)
         dob_str = user.get("dob", "Not set")
-        if dob_str != "Not set":
-            dob_dt = datetime.fromisoformat(dob_str)
-            dob_str = dob_dt.strftime("%d.%m.%Y")
+        if dob_str and dob_str != "Not set":
+            try:
+                dob_dt = datetime.fromisoformat(dob_str)
+                dob_str = dob_dt.strftime("%d.%m.%Y")
+            except Exception:
+                pass
         phone = user.get("phone", "Not set")
-        profile = f"ID: {chat_id}\nPoints: {points}\nLanguage: {user.get('language', 'N/A')}\nGender: {user.get('gender', 'N/A')}\nDOB: {dob_str}\nPhone: {phone}\nInterests: {', '.join(user.get('interests', []))}"
+        profile = (
+            f"ID: {chat_id}\n"
+            f"Points: {points}\n"
+            f"Language: {user.get('language', 'N/A')}\n"
+            f"Gender: {user.get('gender', 'N/A')}\n"
+            f"DOB: {dob_str}\n"
+            f"Phone: {phone}\n"
+            f"Interests: {', '.join(user.get('interests', []))}"
+        )
         await send_message(chat_id, profile, create_main_menu_keyboard())
         await safe_clear_markup(chat_id, message_id)
         return
 
+    # discounts menu: show only categories that user is interested in
     if data == "menu:discounts" and user:
         user_categories = [i for i in user.get("interests", []) if i in CATEGORIES]
         if not user_categories:
@@ -521,8 +569,9 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         await edit_message_keyboard(chat_id, message_id, create_categories_keyboard(user_categories))
         return
 
+    # fetch discounts for category
     if data.startswith("discount_category:") and user:
-        category = data[len("discount_category:"):]
+        category = data.split(":", 1)[1]
         def _q_discounts():
             return supabase.table("discounts").select("*").eq("category", category).eq("active", True).execute()
         resp = await asyncio.to_thread(_q_discounts)
@@ -543,8 +592,9 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         await edit_message_text(chat_id, message_id, text, keyboard)
         return
 
+    # business profile view
     if data.startswith("business_profile:"):
-        business_id = data[17:]
+        business_id = data.split(":", 1)[1]
         business = await supabase_find_business(business_id)
         if not business:
             await send_message(chat_id, "Business not found.", create_main_menu_keyboard())
@@ -555,34 +605,39 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         await safe_clear_markup(chat_id, message_id)
         return
 
+    # user pressed Book or Promo for a discount
     if data.startswith("discount_book:") or data.startswith("discount_promo:"):
-        discount_id = data.split(":")[1]
+        discount_id = data.split(":", 1)[1]
         discount = await supabase_find_discount(discount_id)
         if not discount:
             await send_message(chat_id, "Discount not found.", create_main_menu_keyboard())
             await safe_clear_markup(chat_id, message_id)
             return
-        if user["dob"] and user["phone"]:
+        # if user has dob & phone -> proceed
+        if user and user.get("dob") and user.get("phone"):
             try:
                 code, expiry = await generate_discount_code(chat_id, discount["business_id"], discount_id)
                 await award_points(user["id"], POINTS_CLAIM_PROMO, f"discount_claimed:{discount_id}")
                 business = await supabase_find_business(discount["business_id"])
                 await send_message(chat_id, f"Claimed {discount['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
             except Exception as e:
-                await send_message(chat_id, str(e), create_main_menu_keyboard())
+                logger.exception("Error generating discount code")
+                await send_message(chat_id, "Failed to generate discount. Please try again later.", create_main_menu_keyboard())
             await safe_clear_markup(chat_id, message_id)
+            return
+        # otherwise ask for missing info, set action_after and continue later
+        await safe_clear_markup(chat_id, message_id)
+        action = f"claim_discount:{discount_id}"
+        # prepare state: ask DOB if missing, otherwise ask phone
+        if not user or not user.get("dob"):
+            USER_STATES[chat_id] = {"state": "awaiting_dob", "action_after": action, "last_updated": now_iso()}
+            await send_message(chat_id, "To claim this discount, please provide your date of birth (DD.MM.YYYY).")
         else:
-            await safe_clear_markup(chat_id, message_id)
-            state = {"last_updated": now_iso(), "action_after": f"claim_discount:{discount_id}"}
-            if not user["dob"]:
-                state["state"] = "awaiting_dob"
-                await send_message(chat_id, "To claim this discount, please provide your date of birth (DD.MM.YYYY).")
-            else:
-                state["state"] = "awaiting_phone"
-                await send_message(chat_id, "To claim this discount, please share your phone number:", create_phone_keyboard())
-            USER_STATES[chat_id] = state
+            USER_STATES[chat_id] = {"state": "awaiting_phone", "action_after": action, "last_updated": now_iso()}
+            await send_message(chat_id, "To claim this discount, please share your phone number:", create_phone_keyboard())
         return
 
+    # giveaways list
     if data == "menu:giveaways" and user:
         def _q_giveaways():
             return supabase.table("giveaways").select("*").eq("active", True).execute()
@@ -592,38 +647,39 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
             await send_message(chat_id, "No active giveaways available.", create_main_menu_keyboard())
             await safe_clear_markup(chat_id, message_id)
             return
-        keyboard = {
-            "inline_keyboard": [[{"text": g["name"], "callback_data": f"giveaway:{g['id']}"}] for g in giveaways]
-        }
+        keyboard = {"inline_keyboard": [[{"text": g["name"], "callback_data": f"giveaway:{g['id']}"}] for g in giveaways]}
         await edit_message_keyboard(chat_id, message_id, keyboard)
         return
 
-    if data.startswith("giveaway:") and user:
-        giveaway_id = data[len("giveaway:"):]
+    # user selects specific giveaway
+    if data.startswith("giveaway:"):
+        giveaway_id = data.split(":", 1)[1]
         giveaway = await supabase_find_giveaway(giveaway_id)
         if not giveaway:
             await send_message(chat_id, "Giveaway not found.", create_main_menu_keyboard())
             await safe_clear_markup(chat_id, message_id)
             return
-        if user["dob"] and user["phone"]:
+        # if user profile complete -> generate promo and enter
+        if user and user.get("dob") and user.get("phone"):
             try:
                 code, expiry = await generate_promo_code(chat_id, giveaway["business_id"], giveaway_id, "awaiting_booking")
                 await award_points(user["id"], POINTS_BOOKING_CREATED, f"giveaway_joined:{giveaway_id}")
                 business = await supabase_find_business(giveaway["business_id"])
                 await send_message(chat_id, f"Entered {giveaway['name']} at {business.get('name', 'Unknown')}!\nCode: {code}\nExpires: {expiry[:10]}", create_main_menu_keyboard())
-            except Exception as e:
-                await send_message(chat_id, str(e), create_main_menu_keyboard())
+            except Exception:
+                logger.exception("Error entering giveaway")
+                await send_message(chat_id, "Failed to enter giveaway. Please try again later.", create_main_menu_keyboard())
             await safe_clear_markup(chat_id, message_id)
+            return
+        # otherwise ask for missing info and resume
+        await safe_clear_markup(chat_id, message_id)
+        action = f"claim_giveaway:{giveaway_id}"
+        if not user or not user.get("dob"):
+            USER_STATES[chat_id] = {"state": "awaiting_dob", "action_after": action, "last_updated": now_iso()}
+            await send_message(chat_id, "To enter this giveaway, please provide your date of birth (DD.MM.YYYY).")
         else:
-            await safe_clear_markup(chat_id, message_id)
-            state = {"last_updated": now_iso(), "action_after": f"claim_giveaway:{giveaway_id}"}
-            if not user["dob"]:
-                state["state"] = "awaiting_dob"
-                await send_message(chat_id, "To enter this giveaway, please provide your date of birth (DD.MM.YYYY).")
-            else:
-                state["state"] = "awaiting_phone"
-                await send_message(chat_id, "To enter this giveaway, please share your phone number:", create_phone_keyboard())
-            USER_STATES[chat_id] = state
+            USER_STATES[chat_id] = {"state": "awaiting_phone", "action_after": action, "last_updated": now_iso()}
+            await send_message(chat_id, "To enter this giveaway, please share your phone number:", create_phone_keyboard())
         return
 
     if data == "menu:refer" and user:
@@ -632,5 +688,5 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any]):
         await safe_clear_markup(chat_id, message_id)
         return
 
-    # Handle admin approve/reject callbacks if you want - central_bot handles admin flows in webhook handler typically
+    # admin approve/reject callbacks handled elsewhere (central webhook) - just clear markup here
     await safe_clear_markup(chat_id, message_id)
