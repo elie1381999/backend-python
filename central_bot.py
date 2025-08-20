@@ -1,3 +1,4 @@
+# central_bot.py
 import os
 import asyncio
 import logging
@@ -6,11 +7,19 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 import httpx
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from starlette.responses import PlainTextResponse, JSONResponse
 from supabase import create_client, Client
 
+from config import (
+    SUPABASE_URL,
+    SUPABASE_KEY,
+    ADMIN_SECRET,
+    CENTRAL_BOT_TOKEN,
+    WEBHOOK_URL,
+    VERIFY_KEY,
+    ADMIN_CHAT_ID,
+)
 from convo import (
     handle_message,
     handle_callback,
@@ -29,18 +38,8 @@ from convo import (
 )
 from utils import send_message, set_menu_button, safe_clear_markup
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-# Load environment variables
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-ADMIN_SECRET = os.getenv("ADMIN_SECRET")
-CENTRAL_BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-VERIFY_KEY = os.getenv("VERIFY_KEY")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 app = FastAPI(title="Multi-Business Telegram Bot")
 
@@ -328,9 +327,6 @@ async def admin_stats(is_admin: bool = Depends(verify_admin_secret)):
     except Exception as e:
         logger.exception("Failed to get admin stats")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-
 
 
 
