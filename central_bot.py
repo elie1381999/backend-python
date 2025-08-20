@@ -1,217 +1,185 @@
-# utils.py
+# central_bot.py
 import os
 import asyncio
 import logging
-from typing import Optional, Dict, Any
-import httpx
 from dotenv import load_dotenv
+from fastapi import FastAPI, Request, HTTPException, Header
+from starlette.responses import PlainTextResponse, JSONResponse
+import httpx
+
+from convo_central import (
+    handle_message,
+    handle_callback,
+    supabase_find_business,
+    supabase_find_giveaway,
+    supabase_find_registered,
+    supabase_find_draft,
+    supabase_update_by_id_return,
+    notify_users,
+    award_points,
+    has_history,
+)
+from utils import send_message, set_menu_button
 
 load_dotenv()
-
 logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# Load environment variables
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+ADMIN_SECRET = os.getenv("ADMIN_SECRET")
 CENTRAL_BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+VERIFY_KEY = os.getenv("VERIFY_KEY")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
-if not CENTRAL_BOT_TOKEN:
-    logger.warning("CENTRAL_BOT_TOKEN not set; send_message will fail unless a token is passed explicitly")
+app = FastAPI(title="Multi-Business Telegram Bot")
 
-# --- Telegram helpers ------------------------------------------------------
+if not all([SUPABASE_URL, SUPABASE_KEY, CENTRAL_BOT_TOKEN, WEBHOOK_URL]):
+    logger.warning("One of SUPABASE_URL, SUPABASE_KEY, CENTRAL_BOT_TOKEN, WEBHOOK_URL missing from .env")
 
-async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None,
-                       token: Optional[str] = None, parse_mode: str = "Markdown", retries: int = 3):
-    """Send a Telegram message using async httpx. If token omitted, uses CENTRAL_BOT_TOKEN env var."""
-    bot_token = token or CENTRAL_BOT_TOKEN
-    if not bot_token:
-        raise RuntimeError("No bot token configured for send_message")
+# --- Routes ---------------------------------------------------------------
 
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        for attempt in range(retries):
-            try:
-                logger.debug(f"send_message attempt {attempt+1} -> chat {chat_id}: {text!r}")
-                r = await client.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=payload)
-                r.raise_for_status()
-                return r.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"send_message HTTP {e.response.status_code}: {e.response.text}")
-                if e.response.status_code == 429:
-                    try:
-                        retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
-                    except Exception:
-                        retry_after = 1
-                    await asyncio.sleep(retry_after)
-                    continue
-                return {"ok": False, "error": f"HTTP {e.response.status_code}"}
-            except Exception as exc:
-                logger.exception("send_message error")
-                if attempt < retries - 1:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                continue
-        return {"ok": False, "error": "max_retries"}
-
-async def edit_message_keyboard(chat_id: int, message_id: int, reply_markup: dict,
-                                token: Optional[str] = None, retries: int = 3):
-    bot_token = token or CENTRAL_BOT_TOKEN
-    if not bot_token:
-        raise RuntimeError("No bot token configured for edit_message_keyboard")
-    payload = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        for attempt in range(retries):
-            try:
-                r = await client.post(f"https://api.telegram.org/bot{bot_token}/editMessageReplyMarkup", json=payload)
-                r.raise_for_status()
-                return r.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"edit_message_keyboard HTTP {e.response.status_code}: {e.response.text}")
-                if e.response.status_code == 429:
-                    try:
-                        retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
-                    except Exception:
-                        retry_after = 1
-                    await asyncio.sleep(retry_after)
-                    continue
-                return {"ok": False, "error": f"HTTP {e.response.status_code}"}
-            except Exception:
-                logger.exception("edit_message_keyboard error")
-                if attempt < retries - 1:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                continue
-        return {"ok": False, "error": "max_retries"}
-
-async def clear_inline_keyboard(chat_id: int, message_id: int, token: Optional[str] = None, retries: int = 3):
-    bot_token = token or CENTRAL_BOT_TOKEN
-    if not bot_token:
-        raise RuntimeError("No bot token configured for clear_inline_keyboard")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        for attempt in range(retries):
-            try:
-                r = await client.post(
-                    f"https://api.telegram.org/bot{bot_token}/editMessageReplyMarkup",
-                    json={"chat_id": chat_id, "message_id": message_id, "reply_markup": {}}
-                )
-                r.raise_for_status()
-                return r.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"clear_inline_keyboard HTTP {e.response.status_code}")
-                if e.response.status_code == 429:
-                    try:
-                        retry_after = int(e.response.json().get("parameters", {}).get("retry_after", 1))
-                    except Exception:
-                        retry_after = 1
-                    await asyncio.sleep(retry_after)
-                    continue
-                break
-            except Exception:
-                logger.exception("clear_inline_keyboard")
-                if attempt < retries - 1:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                continue
-        return {"ok": False, "error": "max_retries"}
-
-async def safe_clear_markup(chat_id: int, message_id: Optional[int], token: Optional[str] = None):
-    if message_id is None:
-        return
+@app.post("/hook/central_bot")
+async def central_hook(request: Request):
+    """Primary webhook endpoint for central bot. Delegates to convo_central handlers."""
     try:
-        await clear_inline_keyboard(chat_id, message_id, token=token)
+        update = await request.json()
     except Exception:
-        logger.debug("Ignored error clearing markup", exc_info=True)
+        logger.exception("Invalid JSON in central hook")
+        return PlainTextResponse("ok", status_code=200)
 
-async def set_menu_button(token: Optional[str] = None):
-    """Set chat menu button + default commands for a bot. Uses CENTRAL_BOT_TOKEN by default."""
-    bot_token = token or CENTRAL_BOT_TOKEN
-    if not bot_token:
-        logger.warning("No bot token set for set_menu_button")
-        return
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        try:
-            await client.post(f"https://api.telegram.org/bot{bot_token}/setChatMenuButton", json={"menu_button": {"type": "commands"}})
-            await client.post(f"https://api.telegram.org/bot{bot_token}/setMyCommands", json={
-                "commands": [
-                    {"command": "start", "description": "Start the bot"},
-                    {"command": "menu", "description": "Open the menu"},
-                    {"command": "myid", "description": "Get your Telegram ID"},
-                    {"command": "approve", "description": "Approve a business (admin only)"},
-                    {"command": "reject", "description": "Reject a business (admin only)"},
-                ]
-            })
-            logger.info("set_menu_button completed")
-        except httpx.HTTPStatusError as e:
-            logger.error("Failed to set menu or commands: %s %s", e.response.status_code, e.response.text)
-        except Exception:
-            logger.exception("set_menu_button error")
+    # require at least something
+    if not update:
+        return PlainTextResponse("ok", status_code=200)
 
-# --- Keyboards -------------------------------------------------------------
+    # Optionally set menu button (safe to call repeatedly)
+    try:
+        await set_menu_button()
+    except Exception:
+        logger.exception("set_menu_button failed (continuing)")
 
-def create_menu_options_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "Main Menu", "callback_data": "menu:main"}],
-            [{"text": "Change Language", "callback_data": "menu:language"}]
-        ]
-    }
+    message = update.get("message")
+    callback_query = update.get("callback_query")
 
-def create_language_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "English", "callback_data": "lang:en"}],
-            [{"text": "Русский", "callback_data": "lang:ru"}]
-        ]
-    }
+    chat_id = None
+    if message:
+        chat_id = message.get("chat", {}).get("id")
+    elif callback_query:
+        chat_id = callback_query.get("from", {}).get("id")
 
-def create_gender_keyboard():
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "Female", "callback_data": "gender:female"},
-                {"text": "Male", "callback_data": "gender:male"}
-            ]
-        ]
-    }
+    # Admin manual approve via text commands (simple pattern)
+    if chat_id and ADMIN_CHAT_ID and int(chat_id) == int(ADMIN_CHAT_ID):
+        if message and message.get("text", "").startswith("/approve_"):
+            business_id = message["text"][len("/approve_"):]
+            try:
+                uuid.UUID(business_id)
+                business = await supabase_find_business(business_id)
+                if not business:
+                    await send_message(chat_id, f"Business {business_id} not found.")
+                    return PlainTextResponse("ok", status_code=200)
+                await supabase_update_by_id_return("businesses", business_id, {"status": "approved", "updated_at": datetime.utcnow().isoformat()})
+                await send_message(chat_id, f"Business {business['name']} approved.")
+                await send_message(business["telegram_id"], "Your business has been approved! You can now add discounts and giveaways.")
+            except Exception:
+                await send_message(chat_id, f"Failed to approve business {business_id}.")
+            return PlainTextResponse("ok", status_code=200)
+        if message and message.get("text", "").startswith("/reject_"):
+            business_id = message["text"][len("/reject_"):]
+            try:
+                uuid.UUID(business_id)
+                business = await supabase_find_business(business_id)
+                if not business:
+                    await send_message(chat_id, f"Business {business_id} not found.")
+                    return PlainTextResponse("ok", status_code=200)
+                await supabase_update_by_id_return("businesses", business_id, {"status": "rejected", "updated_at": datetime.utcnow().isoformat()})
+                await send_message(chat_id, f"Business {business['name']} rejected.")
+                await send_message(business["telegram_id"], "Your business registration was rejected. Please contact support.")
+            except Exception:
+                await send_message(chat_id, f"Failed to reject business {business_id}.")
+            return PlainTextResponse("ok", status_code=200)
 
-def create_interests_keyboard(selected: list = None, interests: list = None, emojis: list = None):
-    if selected is None:
-        selected = []
-    if interests is None:
-        interests = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining", "Discounts only", "Giveaways only"]
-    if emojis is None:
-        emojis = ["1️⃣", "2️⃣", "3️⃣"]
-    buttons = []
-    for i, interest in enumerate(interests):
-        text = interest
-        for idx, sel in enumerate(selected):
-            if sel == interest:
-                text = f"{emojis[idx]} {interest}"
-                break
-        buttons.append([{"text": text, "callback_data": f"interest:{interest}"}])
-    buttons.append([{"text": "Done", "callback_data": "interests_done"}])
-    return {"inline_keyboard": buttons}
+    # Delegate updates
+    try:
+        if message:
+            await handle_message(chat_id, message)
+        if callback_query:
+            await handle_callback(chat_id, callback_query)
+    except Exception:
+        logger.exception("Error delegating update")
+    return PlainTextResponse("ok", status_code=200)
 
-def create_main_menu_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "My Points", "callback_data": "menu:points"}],
-            [{"text": "Profile", "callback_data": "menu:profile"}],
-            [{"text": "Discounts", "callback_data": "menu:discounts"}],
-            [{"text": "Giveaways", "callback_data": "menu:giveaways"}],
-            [{"text": "Refer Friends", "callback_data": "menu:refer"}]
-        ]
-    }
+@app.post("/admin/notify/city")
+async def admin_notify_city(request: Request, x_admin_secret: str = Header(...)):
+    if not ADMIN_SECRET or x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid or missing admin secret")
+    try:
+        payload = await request.json()
+        city = payload.get("city")
+        message = payload.get("message")
+        if not city or not message:
+            raise HTTPException(status_code=400, detail="City and message are required")
+        # notify_city logic: find businesses or users by city and notify (left abstract here)
+        # For demonstration, we reuse notify_users when payload has giveaway_id
+        giveaway_id = payload.get("giveaway_id")
+        if giveaway_id:
+            await notify_users(giveaway_id)
+            return {"ok": True}
+        return {"ok": True}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-def create_categories_keyboard(categories: list = None):
-    if categories is None:
-        categories = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining"]
-    buttons = []
-    for cat in categories:
-        buttons.append([{"text": cat, "callback_data": f"discount_category:{cat}"}])
-    return {"inline_keyboard": buttons}
+@app.post("/verify_booking")
+async def verify_booking(request: Request):
+    if VERIFY_KEY:
+        provided = request.headers.get("x-verify-key")
+        if provided != VERIFY_KEY:
+            return PlainTextResponse("Forbidden", status_code=403)
+    try:
+        body = await request.json()
+        promo_code = body.get("promo_code")
+        business_id = body.get("business_id")
+        if not promo_code or not business_id:
+            return PlainTextResponse("promo_code and business_id required", status_code=400)
 
-def create_phone_keyboard():
-    return {
-        "keyboard": [[{"text": "Share phone", "request_contact": True}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": True
-    }
+        # Find promo
+        def _q_giveaway():
+            return supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
+        resp = await asyncio.to_thread(_q_giveaway)
+        promo_row = resp.data[0] if (resp and getattr(resp, "data", None)) else None
+        if not promo_row:
+            return PlainTextResponse("Invalid promo code or business ID", status_code=400)
+        if promo_row["entry_status"] != "awaiting_booking":
+            return PlainTextResponse("Promo code not eligible for verification", status_code=400)
+
+        giveaway_id = promo_row["giveaway_id"]
+        giveaway = await supabase_find_giveaway(giveaway_id)
+        if not giveaway:
+            return PlainTextResponse("Giveaway not found", status_code=400)
+
+        def _update_giveaway():
+            return supabase.table("user_giveaways").update({"entry_status": "winner", "updated_at": datetime.utcnow().isoformat()}).eq("id", promo_row["id"]).execute()
+        await asyncio.to_thread(_update_giveaway)
+
+        chat_id = promo_row["telegram_id"]
+        business = await supabase_find_business(business_id)
+        await send_message(chat_id, f"Congratulations! Your booking for {giveaway['name']} at {business.get('name', 'Unknown')} has been verified. You're a winner!")
+
+        user = await supabase_find_registered(chat_id)
+        if user:
+            reason = f"booking_verified:{giveaway_id}"
+            if not await has_history(user["id"], reason):
+                await award_points(user["id"], POINTS_REFERRAL_VERIFIED, reason)
+        return PlainTextResponse("Booking verified", status_code=200)
+    except Exception:
+        logger.exception("Failed to verify booking")
+        return PlainTextResponse("Internal server error", status_code=500)
+
+@app.get("/")
+def root():
+    return {"message": "Multi-Business Telegram Bot is running!"}
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
