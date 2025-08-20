@@ -1,3 +1,4 @@
+# convo.py
 import os
 import asyncio
 import logging
@@ -6,10 +7,9 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 
-from dotenv import load_dotenv
 from supabase import create_client, Client
 
-from central_bot import ADMIN_CHAT_ID
+from config import ADMIN_CHAT_ID, SUPABASE_URL, SUPABASE_KEY
 from utils import (
     send_message,
     edit_message_text,
@@ -19,9 +19,6 @@ from utils import (
     create_language_keyboard,
     create_gender_keyboard,
     create_interests_keyboard,
-    create_main_menu_keyboard,
-    create_categories_keyboard,
-    create_phone_keyboard,
 )
 
 load_dotenv()
