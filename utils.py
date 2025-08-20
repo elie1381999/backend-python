@@ -1,6 +1,5 @@
 # utils.py
 import os
-import asyncio
 import logging
 from typing import Optional
 import httpx
@@ -11,14 +10,13 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 CENTRAL_BOT_TOKEN = os.getenv("CENTRAL_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not CENTRAL_BOT_TOKEN:
-    logger.warning("CENTRAL_BOT_TOKEN not set; send_message will fail unless token provided explicitly")
+    logger.warning("CENTRAL_BOT_TOKEN not set; some functions may raise until token provided explicitly")
 
 # --- Telegram API helpers ---
 async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None,
-                       token: Optional[str] = None, parse_mode: str = "Markdown") -> dict:
+                       token: Optional[str] = None, parse_mode: str = "Markdown"):
     bot_token = token or CENTRAL_BOT_TOKEN
     if not bot_token:
         raise RuntimeError("No bot token configured")
@@ -35,7 +33,7 @@ async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = N
             return {"ok": False, "error": "send_failed"}
 
 async def edit_message_text(chat_id: int, message_id: int, text: str, reply_markup: Optional[dict] = None,
-                            token: Optional[str] = None, parse_mode: str = "Markdown") -> dict:
+                            token: Optional[str] = None, parse_mode: str = "Markdown"):
     bot_token = token or CENTRAL_BOT_TOKEN
     if not bot_token:
         raise RuntimeError("No bot token")
@@ -52,7 +50,7 @@ async def edit_message_text(chat_id: int, message_id: int, text: str, reply_mark
             return {"ok": False, "error": "edit_failed"}
 
 async def edit_message_keyboard(chat_id: int, message_id: int, reply_markup: dict,
-                                token: Optional[str] = None) -> dict:
+                                token: Optional[str] = None):
     bot_token = token or CENTRAL_BOT_TOKEN
     if not bot_token:
         raise RuntimeError("No bot token")
@@ -99,8 +97,8 @@ async def set_menu_button(token: Optional[str] = None):
             await client.post(f"https://api.telegram.org/bot{bot_token}/setMyCommands", json={
                 "commands": [
                     {"command": "start", "description": "Start the bot"},
-                    {"command": "menu", "description": "Open menu"},
-                    {"command": "myid", "description": "Show your ID"},
+                    {"command": "menu", "description": "Open the menu"},
+                    {"command": "myid", "description": "Get your Telegram ID"},
                 ]
             })
         except Exception:
@@ -108,13 +106,21 @@ async def set_menu_button(token: Optional[str] = None):
 
 # --- Keyboards ---
 def create_menu_options_keyboard():
-    return {"inline_keyboard": [[{"text": "Main Menu", "callback_data": "menu:main"}], [{"text": "Change Language", "callback_data": "menu:language"}]]}
+    return {"inline_keyboard": [
+        [{"text": "Main Menu", "callback_data": "menu:main"}],
+        [{"text": "Change Language", "callback_data": "menu:language"}]
+    ]}
 
 def create_language_keyboard():
-    return {"inline_keyboard": [[{"text": "English", "callback_data": "lang:en"}], [{"text": "Русский", "callback_data": "lang:ru"}]]}
+    return {"inline_keyboard": [
+        [{"text": "English", "callback_data": "lang:en"}],
+        [{"text": "Русский", "callback_data": "lang:ru"}]
+    ]}
 
 def create_gender_keyboard():
-    return {"inline_keyboard": [[{"text": "Female", "callback_data": "gender:female"}, {"text": "Male", "callback_data": "gender:male"}]]}
+    return {"inline_keyboard": [
+        [{"text": "Female", "callback_data": "gender:female"}, {"text": "Male", "callback_data": "gender:male"}]
+    ]}
 
 def create_interests_keyboard(selected: list = None, interests: list = None, emojis: list = None):
     if selected is None:
@@ -140,14 +146,13 @@ def create_main_menu_keyboard():
         [{"text": "Profile", "callback_data": "menu:profile"}],
         [{"text": "Discounts", "callback_data": "menu:discounts"}],
         [{"text": "Giveaways", "callback_data": "menu:giveaways"}],
-        [{"text": "Refer Friends", "callback_data": "menu:refer"}]
+        [{"text": "Refer Friends", "callback_data": "menu:refer"}],
     ]}
 
 def create_categories_keyboard(categories: list = None):
     if categories is None:
         categories = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining"]
-    keyboard = {"inline_keyboard": [[{"text": c, "callback_data": f"discount_category:{c}"}] for c in categories]}
-    return keyboard
+    return {"inline_keyboard": [[{"text": c, "callback_data": f"discount_category:{c}"}] for c in categories]}
 
 def create_phone_keyboard():
     return {"keyboard": [[{"text": "Share phone", "request_contact": True}]], "resize_keyboard": True, "one_time_keyboard": True}
