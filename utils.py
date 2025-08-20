@@ -20,7 +20,6 @@ if not CENTRAL_BOT_TOKEN:
 
 async def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None,
                        token: Optional[str] = None, parse_mode: str = "Markdown", retries: int = 3):
-    """Send a Telegram message using async httpx. If token omitted, uses CENTRAL_BOT_TOKEN env var."""
     bot_token = token or CENTRAL_BOT_TOKEN
     if not bot_token:
         raise RuntimeError("No bot token configured for send_message")
@@ -121,7 +120,6 @@ async def safe_clear_markup(chat_id: int, message_id: Optional[int], token: Opti
         logger.debug("Ignored error clearing markup", exc_info=True)
 
 async def set_menu_button(token: Optional[str] = None):
-    """Set chat menu button + default commands for a bot. Uses CENTRAL_BOT_TOKEN by default."""
     bot_token = token or CENTRAL_BOT_TOKEN
     if not bot_token:
         logger.warning("No bot token set for set_menu_button")
@@ -134,6 +132,7 @@ async def set_menu_button(token: Optional[str] = None):
                     {"command": "start", "description": "Start the bot"},
                     {"command": "menu", "description": "Open the menu"},
                     {"command": "myid", "description": "Get your Telegram ID"},
+                    {"command": "feedback", "description": "Send feedback"},
                     {"command": "approve", "description": "Approve a business (admin only)"},
                     {"command": "reject", "description": "Reject a business (admin only)"},
                 ]
@@ -167,27 +166,32 @@ def create_gender_keyboard():
         "inline_keyboard": [
             [
                 {"text": "Female", "callback_data": "gender:female"},
-                {"text": "Male", "callback_data": "gender:male"}
+                {"text": "Male", "callback_data": "gender:male"},
+                {"text": "Other", "callback_data": "gender:other"}
             ]
         ]
     }
 
-def create_interests_keyboard(selected: list = None, interests: list = None, emojis: list = None):
+def create_interests_keyboard(selected: list = None, interests: list = None, max_select: int = 5):
+    """
+    Create an inline keyboard for selecting up to `max_select` interests.
+    Selected items will be prefixed with numeric emoji indicating selection order.
+    """
     if selected is None:
         selected = []
     if interests is None:
         interests = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining", "Discounts only", "Giveaways only"]
-    if emojis is None:
-        emojis = ["1️⃣", "2️⃣", "3️⃣"]
+    numeric_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
     buttons = []
     for i, interest in enumerate(interests):
         text = interest
+        # show emoji for up to max_select selections
         for idx, sel in enumerate(selected):
-            if sel == interest:
-                text = f"{emojis[idx]} {interest}"
+            if sel == interest and idx < max_select:
+                text = f"{numeric_emojis[idx]} {interest}"
                 break
         buttons.append([{"text": text, "callback_data": f"interest:{interest}"}])
-    buttons.append([{"text": "Done", "callback_data": "interests_done"}])
+    buttons.append([{"text": f"Done ({len(selected)}/{max_select})", "callback_data": "interests_done"}])
     return {"inline_keyboard": buttons}
 
 def create_main_menu_keyboard():
@@ -198,6 +202,21 @@ def create_main_menu_keyboard():
             [{"text": "Discounts", "callback_data": "menu:discounts"}],
             [{"text": "Giveaways", "callback_data": "menu:giveaways"}],
             [{"text": "Refer Friends", "callback_data": "menu:refer"}]
+        ]
+    }
+
+def create_discount_card_keyboard(discount_id: str):
+    """
+    Keyboard shown when user opens a discount details.
+    Buttons: Profile | Book | Promo Code
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Profile", "callback_data": f"discount_profile:{discount_id}"},
+                {"text": "Book", "callback_data": f"discount_book:{discount_id}"},
+                {"text": "Promo Code", "callback_data": f"discount_code:{discount_id}"}
+            ]
         ]
     }
 
