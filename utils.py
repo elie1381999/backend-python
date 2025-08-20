@@ -1,3 +1,4 @@
+# utils.py
 import os
 import asyncio
 import logging
@@ -151,7 +152,7 @@ async def safe_clear_markup(chat_id: int, message_id: Optional[int], token: Opti
         logger.debug("Ignored error clearing markup", exc_info=True)
 
 async def set_menu_button(token: Optional[str] = None):
-    """Set chat menu button + default commands for a bot. Uses CENTRAL_BOT_TOKEN by default."""
+    """Set chat menu button + default commands for a bot."""
     bot_token = token or CENTRAL_BOT_TOKEN
     if not bot_token:
         logger.warning("No bot token set for set_menu_button")
@@ -169,8 +170,6 @@ async def set_menu_button(token: Optional[str] = None):
                 ]
             })
             logger.info("set_menu_button completed")
-        except httpx.HTTPStatusError as e:
-            logger.error("Failed to set menu or commands: %s %s", e.response.status_code, e.response.text)
         except Exception:
             logger.exception("set_menu_button error")
 
@@ -206,7 +205,7 @@ def create_interests_keyboard(selected: list = None, interests: list = None, emo
     if selected is None:
         selected = []
     if interests is None:
-        interests = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining", "Discounts only", "Giveaways only"]
+        interests = INTERESTS
     if emojis is None:
         emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
     buttons = []
@@ -233,7 +232,7 @@ def create_main_menu_keyboard():
 
 def create_categories_keyboard(categories: list = None):
     if categories is None:
-        categories = ["Nails", "Hair", "Lashes", "Massage", "Spa", "Fine Dining", "Casual Dining"]
+        categories = CATEGORIES
     buttons = []
     for cat in categories:
         buttons.append([{"text": cat, "callback_data": f"discount_category:{cat}"}])
