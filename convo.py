@@ -598,7 +598,10 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
     state = get_state(chat_id) or {}
 
     # Handle admin approval/rejection callbacks
-    if chat_id and ADMIN_CHAT_ID and int(chat_id) == int(ADMIN_CHAT_ID):
+    if ADMIN_CHAT_ID is None:
+        logger.warning("ADMIN_CHAT_ID is not set; admin functionality disabled")
+    if chat_id and ADMIN_CHAT_ID is not None and int(chat_id) == int(ADMIN_CHAT_ID):
+
         if data.startswith("approve:"):
             business_id = data[len("approve:"):]
             try:
