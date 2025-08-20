@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
+from central_bot import ADMIN_CHAT_ID
 from utils import (
     send_message,
     edit_message_text,
