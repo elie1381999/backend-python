@@ -1,3 +1,4 @@
+# central_bot.py
 import os
 import asyncio
 import logging
@@ -5,7 +6,7 @@ import uuid
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Header
-from starlette.responses import PlainTextResponse, JSONResponse
+from starlette.responses import PlainTextResponse
 
 from convo_central import (
     handle_message,
@@ -50,7 +51,6 @@ async def central_hook(request: Request):
         logger.exception("Invalid JSON in central hook")
         return PlainTextResponse("ok", status_code=200)
 
-    # require at least something
     if not update:
         return PlainTextResponse("ok", status_code=200)
 
@@ -82,7 +82,8 @@ async def central_hook(request: Request):
                     return PlainTextResponse("ok", status_code=200)
                 await supabase_update_by_id_return("businesses", business_id, {"status": "approved", "updated_at": datetime.utcnow().isoformat()})
                 await send_message(chat_id, f"Business {business.get('name', business_id)} approved.")
-                await send_message(business["telegram_id"], "Your business has been approved! You can now add discounts and giveaways.")
+                if business.get("telegram_id"):
+                    await send_message(business["telegram_id"], "Your business has been approved! You can now add discounts and giveaways.")
             except Exception:
                 logger.exception("approve command failed")
                 await send_message(chat_id, f"Failed to approve business {business_id}.")
@@ -98,7 +99,8 @@ async def central_hook(request: Request):
                     return PlainTextResponse("ok", status_code=200)
                 await supabase_update_by_id_return("businesses", business_id, {"status": "rejected", "updated_at": datetime.utcnow().isoformat()})
                 await send_message(chat_id, f"Business {business.get('name', business_id)} rejected.")
-                await send_message(business["telegram_id"], "Your business registration was rejected. Please contact support.")
+                if business.get("telegram_id"):
+                    await send_message(business["telegram_id"], "Your business registration was rejected. Please contact support.")
             except Exception:
                 logger.exception("reject command failed")
                 await send_message(chat_id, f"Failed to reject business {business_id}.")
@@ -115,8 +117,6 @@ async def central_hook(request: Request):
     return PlainTextResponse("ok", status_code=200)
 
 # Backwards-compat alias expected by previous main.py
-# Some deployment scaffolds import `webhook_handler` from central_bot.
-# Provide that name so `from central_bot import webhook_handler` works.
 async def webhook_handler(request: Request):
     return await central_hook(request)
 
@@ -131,7 +131,6 @@ async def admin_notify_city(request: Request, x_admin_secret: str = Header(...))
         if not city or not message:
             raise HTTPException(status_code=400, detail="City and message are required")
         # notify_city logic: find businesses or users by city and notify (left abstract here)
-        # For demonstration, we reuse notify_users when payload has giveaway_id
         giveaway_id = payload.get("giveaway_id")
         if giveaway_id:
             await notify_users(giveaway_id)
@@ -153,24 +152,33 @@ async def verify_booking(request: Request):
         if not promo_code or not business_id:
             return PlainTextResponse("promo_code and business_id required", status_code=400)
 
-        # Find promo
+        # Find promo in giveaways (primary)
         def _q_giveaway():
-            return supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()
-        resp = await asyncio.to_thread(_q_giveaway)
-        promo_row = resp.data[0] if (resp and getattr(resp, "data", None)) else None
+            return convo_supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()  # placeholder replaced below
+        # Because central_bot shouldn't talk directly to supabase instance in this module,
+        # we delegate verification logic to convo_central via its helpers by reusing patterns there.
+        # Here we call functions from convo_central:
+        from convo_central import find_promo_row  # local import to avoid circular import earlier
+        promo_row, table_name = await find_promo_row(promo_code, business_id)
         if not promo_row:
             return PlainTextResponse("Invalid promo code or business ID", status_code=400)
-        if promo_row["entry_status"] != "awaiting_booking":
+        # Only allow verification for awaiting_booking rows
+        if promo_row.get("entry_status") != "awaiting_booking":
             return PlainTextResponse("Promo code not eligible for verification", status_code=400)
 
-        giveaway_id = promo_row["giveaway_id"]
+        giveaway_id = promo_row.get("giveaway_id")
         giveaway = await supabase_find_giveaway(giveaway_id)
         if not giveaway:
             return PlainTextResponse("Giveaway not found", status_code=400)
 
-        def _update_giveaway():
-            return supabase.table("user_giveaways").update({"entry_status": "winner", "updated_at": datetime.utcnow().isoformat()}).eq("id", promo_row["id"]).execute()
-        await asyncio.to_thread(_update_giveaway)
+        # mark winner
+        await convo_central_update_promo_to_winner = None
+        # delegate to convo_central helper that updates DB rows:
+        from convo_central import mark_promo_as_winner, supabase_find_registered as _unused
+        try:
+            await mark_promo_as_winner(table_name, promo_row["id"])
+        except Exception:
+            logger.exception("Failed marking promo winner (continuing)")
 
         chat_id = promo_row["telegram_id"]
         business = await supabase_find_business(business_id)
