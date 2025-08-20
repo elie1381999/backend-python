@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Header
 from starlette.responses import PlainTextResponse
 
+# Import helpers from convo_central
 from convo_central import (
     handle_message,
     handle_callback,
@@ -19,7 +20,10 @@ from convo_central import (
     award_points,
     has_history,
     POINTS_REFERRAL_VERIFIED,
+    find_promo_row,
+    mark_promo_as_winner,
 )
+
 from utils import send_message, set_menu_button
 
 load_dotenv()
@@ -152,17 +156,12 @@ async def verify_booking(request: Request):
         if not promo_code or not business_id:
             return PlainTextResponse("promo_code and business_id required", status_code=400)
 
-        # Find promo in giveaways (primary)
-        def _q_giveaway():
-            return convo_supabase.table("user_giveaways").select("*").eq("promo_code", promo_code).eq("business_id", business_id).limit(1).execute()  # placeholder replaced below
-        # Because central_bot shouldn't talk directly to supabase instance in this module,
-        # we delegate verification logic to convo_central via its helpers by reusing patterns there.
-        # Here we call functions from convo_central:
-        from convo_central import find_promo_row  # local import to avoid circular import earlier
+        # Use convo_central helper to find promo row in either table
         promo_row, table_name = await find_promo_row(promo_code, business_id)
         if not promo_row:
             return PlainTextResponse("Invalid promo code or business ID", status_code=400)
-        # Only allow verification for awaiting_booking rows
+
+        # only verify promos that were awaiting booking
         if promo_row.get("entry_status") != "awaiting_booking":
             return PlainTextResponse("Promo code not eligible for verification", status_code=400)
 
@@ -171,14 +170,11 @@ async def verify_booking(request: Request):
         if not giveaway:
             return PlainTextResponse("Giveaway not found", status_code=400)
 
-        # mark winner
-        await convo_central_update_promo_to_winner = None
-        # delegate to convo_central helper that updates DB rows:
-        from convo_central import mark_promo_as_winner, supabase_find_registered as _unused
+        # mark promo row as winner (delegated helper)
         try:
             await mark_promo_as_winner(table_name, promo_row["id"])
         except Exception:
-            logger.exception("Failed marking promo winner (continuing)")
+            logger.exception("mark_promo_as_winner failed (continuing)")
 
         chat_id = promo_row["telegram_id"]
         business = await supabase_find_business(business_id)
