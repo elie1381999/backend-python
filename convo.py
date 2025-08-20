@@ -18,6 +18,9 @@ from utils import (
     create_language_keyboard,
     create_gender_keyboard,
     create_interests_keyboard,
+    create_categories_keyboard,  # Added to fix NameError
+    create_main_menu_keyboard,
+    create_phone_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -861,8 +864,8 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
                 await send_message(chat_id, "No interests set. Please update your profile.", token=token)
                 return
             
-            await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
-            return
+           await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
+        return
         
         elif data == "menu:giveaways":
             try:
