@@ -850,21 +850,21 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             )
             return
         
-        elif data == "menu:discounts":
-            if not registered.get("phone_number") or not registered.get("dob"):
-                await send_message(chat_id, "Complete your profile to access discounts:", reply_markup=create_phone_keyboard(), token=token)
-                state["stage"] = "awaiting_phone_profile"
-                state["data"] = registered
-                state["entry_id"] = registered["id"]
-                set_state(chat_id, state)
-                return
-            
-            interests = registered.get("interests", []) or []
-            if not interests:
-                await send_message(chat_id, "No interests set. Please update your profile.", token=token)
-                return
-            
-           await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
+          elif data == "menu:discounts":
+        if not registered.get("phone_number") or not registered.get("dob"):
+            await send_message(chat_id, "Complete your profile to access discounts:", reply_markup=create_phone_keyboard(), token=token)
+            state["stage"] = "awaiting_phone_profile"
+            state["data"] = registered
+            state["entry_id"] = registered["id"]
+            set_state(chat_id, state)
+            return
+        
+        interests = registered.get("interests", []) or []
+        if not interests:
+            await send_message(chat_id, "No interests set. Please update your profile.", token=token)
+            return
+        
+        await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
         return
         
         elif data == "menu:giveaways":
