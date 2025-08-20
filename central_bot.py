@@ -14,7 +14,6 @@ from convo_central import (
     supabase_find_business,
     supabase_find_giveaway,
     supabase_find_registered,
-    supabase_find_draft,
     supabase_update_by_id_return,
     notify_users,
     award_points,
