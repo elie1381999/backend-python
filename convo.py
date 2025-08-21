@@ -71,6 +71,23 @@ def compute_tier(points: int) -> str:
             tier = name
     return tier
 
+def create_business_profile_keyboard(business_id: str):
+    """Create keyboard with web app button for business profile"""
+    web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={business_id}&action=view_profile"
+
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "View Profile", "web_app": {"url": web_app_url}},
+                {"text": "View Services", "callback_data": f"services:{business_id}"}
+            ],
+            [
+                {"text": "Book", "callback_data": f"book:{business_id}"},
+                {"text": "Get Discount", "callback_data": f"get_discount:{business_id}"}
+            ]
+        ]
+    }
+
 def set_state(chat_id: int, state: Dict[str, Any]):
     state["updated_at"] = now_iso()
     USER_STATES[chat_id] = state
@@ -88,22 +105,7 @@ def get_state(chat_id: int) -> Optional[Dict[str, Any]]:
         USER_STATES.pop(chat_id, None)
         return None
     return st
-    
- def create_business_profile_keyboard(business_id: str):
-        web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={business_id}&action=view_profile"
 
-        return {
-            "inline_keyboard": [
-                [
-                    {"text": "View Profile", "web_app": {"url": web_app_url}},
-                    {"text": "View Services", "callback_data": f"services:{business_id}"}
-                ],
-                [
-                    {"text": "Book", "callback_data": f"book:{business_id}"},
-                    {"text": "Get Discount", "callback_data": f"get_discount:{business_id}"}
-                ]
-            ]
-        }
 # --- Supabase helpers (all executed in threads because supabase client is sync) ----
 
 async def supabase_find_registered(chat_id: int) -> Optional[Dict[str, Any]]:
