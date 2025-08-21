@@ -885,9 +885,9 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
             return
             
-           if data.startswith("discount_category:"):
+            if data.startswith("discount_category:"):
         category = data[len("discount_category:"):]
-           if category not in CATEGORIES:
+            if category not in CATEGORIES:
             await send_message(chat_id, "Invalid category.", token=token)
             return
 
