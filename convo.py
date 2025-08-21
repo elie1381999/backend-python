@@ -868,7 +868,7 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
             return
 
-       def create_business_profile_keyboard(business_id: str):
+          def create_business_profile_keyboard(business_id: str):
         """Create keyboard with web app button for business profile"""
         web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={business_id}&action=view_profile"
 
@@ -885,7 +885,6 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             ]
         }
 
-    # Discount category -> list discounts (callback handler)
     if data.startswith("discount_category:"):
         category = data[len("discount_category:"):]
         if category not in CATEGORIES:
@@ -911,7 +910,6 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
                     await send_message(chat_id, f"Business not found for discount {d['name']}.", token=token)
                     continue
 
-                # Fetch business categories
                 def _query_categories():
                     return supabase.table("business_categories").select("category").eq(
                         "business_id", d["business_id"]
@@ -946,7 +944,6 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             await send_message(chat_id, "Failed to load discounts. Please try again later.", token=token)
         return
 
-    # Business profile (callback)
     if data.startswith("profile:"):
         business_id = data[len("profile:"):]
         try:
@@ -955,7 +952,6 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
                 await send_message(chat_id, "Business not found.", token=token)
                 return
 
-            # Fetch business categories
             def _query_categories():
                 return supabase.table("business_categories").select("category").eq("business_id", business_id).execute()
 
@@ -978,7 +974,6 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             await send_message(chat_id, "Failed to load profile.", token=token)
         return
 
-        
         elif data.startswith("services:"):
             business_id = data[len("services:"):]
             try:
