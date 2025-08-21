@@ -88,7 +88,22 @@ def get_state(chat_id: int) -> Optional[Dict[str, Any]]:
         USER_STATES.pop(chat_id, None)
         return None
     return st
+    
+ def create_business_profile_keyboard(business_id: str):
+        web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={business_id}&action=view_profile"
 
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "View Profile", "web_app": {"url": web_app_url}},
+                    {"text": "View Services", "callback_data": f"services:{business_id}"}
+                ],
+                [
+                    {"text": "Book", "callback_data": f"book:{business_id}"},
+                    {"text": "Get Discount", "callback_data": f"get_discount:{business_id}"}
+                ]
+            ]
+        }
 # --- Supabase helpers (all executed in threads because supabase client is sync) ----
 
 async def supabase_find_registered(chat_id: int) -> Optional[Dict[str, Any]]:
@@ -868,25 +883,9 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
             return
             
-           def create_business_profile_keyboard(business_id: str):
-        web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={business_id}&action=view_profile"
-
-        return {
-            "inline_keyboard": [
-                [
-                    {"text": "View Profile", "web_app": {"url": web_app_url}},
-                    {"text": "View Services", "callback_data": f"services:{business_id}"}
-                ],
-                [
-                    {"text": "Book", "callback_data": f"book:{business_id}"},
-                    {"text": "Get Discount", "callback_data": f"get_discount:{business_id}"}
-                ]
-            ]
-        }
-
-    if data.startswith("discount_category:"):
+           if data.startswith("discount_category:"):
         category = data[len("discount_category:"):]
-        if category not in CATEGORIES:
+           if category not in CATEGORIES:
             await send_message(chat_id, "Invalid category.", token=token)
             return
 
