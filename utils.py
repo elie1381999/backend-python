@@ -215,12 +215,15 @@ def create_interests_keyboard(selected: list = None):
     return {"inline_keyboard": buttons}
 
 def create_main_menu_keyboard():
+    web_app_url = "https://flutter-web-app-3q0r.onrender.com/"
+    
     return {
         "inline_keyboard": [
             [{"text": "My Points", "callback_data": "menu:points"}],
             [{"text": "Profile", "callback_data": "menu:profile"}],
             [{"text": "Discounts", "callback_data": "menu:discounts"}],
-            [{"text": "Giveaways", "callback_data": "menu:giveaways"}]
+            [{"text": "Giveaways", "callback_data": "menu:giveaways"}],
+            [{"text": "Open Web App", "web_app": {"url": web_app_url}}]
         ]
     }
 
