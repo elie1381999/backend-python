@@ -59,6 +59,22 @@ TIER_THRESHOLDS = [
 
 USER_STATES: Dict[int, Dict[str, Any]] = {}
 
+def create_business_profile_keyboard(business_id: str):
+    """Create keyboard with web app button for business profile"""
+    web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={business_id}&action=view_profile"
+    
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "View Profile", "web_app": {"url": web_app_url}},
+                {"text": "View Services", "callback_data": f"services:{business_id}"}
+            ],
+            [
+                {"text": "Book", "callback_data": f"book:{business_id}"},
+                {"text": "Get Discount", "callback_data": f"get_discount:{business_id}"}
+            ]
+        ]
+    }
 # --- Utilities -------------------------------------------------------------
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
