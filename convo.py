@@ -868,8 +868,7 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
             return
             
-        def create_business_profile_keyboard(business_id: str):
-        """Create keyboard with web app button for business profile"""
+           def create_business_profile_keyboard(business_id: str):
         web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={business_id}&action=view_profile"
 
         return {
