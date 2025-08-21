@@ -869,80 +869,79 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             return
         
         elif data == "menu:discounts":
-            if not registered.get("phone_number") or not registered.get("dob"):
-                await send_message(chat_id, "Complete your profile to access discounts:", reply_markup=create_phone_keyboard(), token=token)
-                state["stage"] = "awaiting_phone_profile"
-                state["data"] = registered
-                state["entry_id"] = registered["id"]
-                set_state(chat_id, state)
-                return
-            
-            interests = registered.get("interests", []) or []
-            if not interests:
-                await send_message(chat_id, "No interests set. Please update your profile.", token=token)
-                return
-            
-            await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
-            return
-            
-            if data.startswith("discount_category:"):
-                category = data[len("discount_category:"):]
-                if category not in CATEGORIES:
-                    await send_message(chat_id, "Invalid category.", token=token)
-                    return
-
-        try:
-            def _query_discounts():
-                return supabase.table("discounts").select(
-                    "id, name, discount_percentage, category, business_id"
-                ).eq("category", category).eq("active", True).execute()
-
-            resp = await asyncio.to_thread(_query_discounts)
-            discounts = resp.data if hasattr(resp, "data") else resp.get("data", [])
-
-            if not discounts:
-                await send_message(chat_id, f"No discounts available in *{category}*.", token=token)
-                return
-
-            for d in discounts:
-                business = await supabase_find_business(d["business_id"])
-                if not business:
-                    await send_message(chat_id, f"Business not found for discount {d['name']}.", token=token)
-                    continue
-
-                def _query_categories():
-                    return supabase.table("business_categories").select("category").eq(
-                        "business_id", d["business_id"]
-                    ).execute()
-
-                categories_resp = await asyncio.to_thread(_query_categories)
-                categories = [cat["category"] for cat in (categories_resp.data if hasattr(categories_resp, "data") else categories_resp.get("data", []))] or ["None"]
-                location = business.get("location", "Unknown")
-
-                message = (
-                    f"Discount: *{d['name']}*\n"
-                    f"Category: *{d['category']}*\n"
-                    f"Percentage: {d['discount_percentage']}%\n"
-                    f"At: {business['name']}\n"
-                    f"Location: {location}\n"
-                    f"Business Categories: {', '.join(categories)}"
-                )
-
-                web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={d['business_id']}&action=view_discount&discount_id={d['id']}"
-
-                keyboard = {
-                    "inline_keyboard": [
-                        [
-                            {"text": "View in Web App", "web_app": {"url": web_app_url}}
-                        ]
-                    ]
-                }
-
-                await send_message(chat_id, message, keyboard, token=token)
-        except Exception as e:
-            logger.error(f"Failed to fetch discounts for category {category}, chat_id {chat_id}: {str(e)}")
-            await send_message(chat_id, "Failed to load discounts. Please try again later.", token=token)
+    if not registered.get("phone_number") or not registered.get("dob"):
+        await send_message(chat_id, "Complete your profile to access discounts:", reply_markup=create_phone_keyboard(), token=token)
+        state["stage"] = "awaiting_phone_profile"
+        state["data"] = registered
+        state["entry_id"] = registered["id"]
+        set_state(chat_id, state)
         return
+
+    interests = registered.get("interests", []) or []
+    if not interests:
+        await send_message(chat_id, "No interests set. Please update your profile.", token=token)
+        return
+
+    await send_message(chat_id, "Choose a category for discounts:", reply_markup=create_categories_keyboard(), token=token)
+    return
+
+    if data.startswith("discount_category:"):
+        category = data[len("discount_category:"):]
+    if category not in CATEGORIES:
+        await send_message(chat_id, "Invalid category.", token=token)
+        return
+    try:
+        def _query_discounts():
+            return supabase.table("discounts").select(
+                "id, name, discount_percentage, category, business_id"
+            ).eq("category", category).eq("active", True).execute()
+
+        resp = await asyncio.to_thread(_query_discounts)
+        discounts = resp.data if hasattr(resp, "data") else resp.get("data", [])
+
+        if not discounts:
+            await send_message(chat_id, f"No discounts available in *{category}*.", token=token)
+            return
+
+        for d in discounts:
+            business = await supabase_find_business(d["business_id"])
+            if not business:
+                await send_message(chat_id, f"Business not found for discount {d['name']}.", token=token)
+                continue
+
+            def _query_categories():
+                return supabase.table("business_categories").select("category").eq(
+                    "business_id", d["business_id"]
+                ).execute()
+
+            categories_resp = await asyncio.to_thread(_query_categories)
+            categories = [cat["category"] for cat in (categories_resp.data if hasattr(categories_resp, "data") else categories_resp.get("data", []))] or ["None"]
+            location = business.get("location", "Unknown")
+
+            message = (
+                f"Discount: *{d['name']}*\n"
+                f"Category: *{d['category']}*\n"
+                f"Percentage: {d['discount_percentage']}%\n"
+                f"At: {business['name']}\n"
+                f"Location: {location}\n"
+                f"Business Categories: {', '.join(categories)}"
+            )
+
+            web_app_url = f"https://flutter-web-app-3q0r.onrender.com/?business_id={d['business_id']}&action=view_discount&discount_id={d['id']}"
+
+            keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "View in Web App", "web_app": {"url": web_app_url}}
+                    ]
+                ]
+            }
+
+            await send_message(chat_id, message, keyboard, token=token)
+    except Exception as e:
+        logger.error(f"Failed to fetch discounts for category {category}, chat_id {chat_id}: {str(e)}")
+        await send_message(chat_id, "Failed to load discounts. Please try again later.", token=token)
+    return
 
     if data.startswith("profile:"):
         business_id = data[len("profile:"):]
