@@ -869,7 +869,7 @@ async def handle_callback(chat_id: int, callback_query: Dict[str, Any], token: s
             return
         
         elif data == "menu:discounts":
-    if not registered.get("phone_number") or not registered.get("dob"):
+            if not registered.get("phone_number") or not registered.get("dob"):
         await send_message(chat_id, "Complete your profile to access discounts:", reply_markup=create_phone_keyboard(), token=token)
         state["stage"] = "awaiting_phone_profile"
         state["data"] = registered
